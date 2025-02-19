@@ -10,16 +10,31 @@
     <marker id="arrow" markerWidth="10" markerHeight="10" refX="0" refY="3" orient="auto">
       <path d="M0,0 L0,6 L9,3 Z" fill="white" />
     </marker>
+    <!-- Inline CSS for interactivity -->
+    <style type="text/css">
+      <![CDATA[
+        .interactive:hover {
+          animation: spin 2s linear infinite;
+        }
+        @keyframes spin {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
+      ]]>
+    </style>
   </defs>
 
-  <!-- Main circular background -->
-  <circle cx="150" cy="150" r="120" fill="url(#gradient)" />
+  <!-- Wrap all elements in a group with class 'interactive' and set the transform-origin to the center -->
+  <g class="interactive" style="transform-origin: 150px 150px;">
+    <!-- Main circular background -->
+    <circle cx="150" cy="150" r="120" fill="url(#gradient)" />
 
-  <!-- The "Editax" text in the middle -->
-  <text x="150" y="160" font-family="Verdana" font-size="40" fill="white" text-anchor="middle" dominant-baseline="middle">
-    Editax
-  </text>
+    <!-- The "Editax" text in the middle -->
+    <text x="150" y="160" font-family="Verdana" font-size="40" fill="white" text-anchor="middle" dominant-baseline="middle">
+      Editax
+    </text>
 
-  <!-- A diagonal arrow crossing the circle -->
-  <line x1="80" y1="220" x2="220" y2="80" stroke="white" stroke-width="4" marker-end="url(#arrow)" />
+    <!-- A diagonal arrow crossing the circle -->
+    <line x1="80" y1="220" x2="220" y2="80" stroke="white" stroke-width="4" marker-end="url(#arrow)" />
+  </g>
 </svg> 

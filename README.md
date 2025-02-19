@@ -1,6 +1,6 @@
-# Editax
-
 ![Editax Logo](editax-logo.svg)
+
+# Editax
 
 Editax is a framework for creating automated ACCEL editors for Unsupervised Environment Design. Its primary goal is to generate and refine modifications to reinforcement learning (RL) environments automatically. By leveraging advanced language models and minimal meaningful perturbation strategies, Editax provides a scalable way to design environments that both ease agents into training and continuously challenge them as they progress.
 
@@ -37,7 +37,7 @@ Follow these steps to set up Editax locally:
    python -m venv .venv
    source .venv/bin/activate  # On Windows: .venv\Scripts\activate
    pip install poetry
-   poetry install
+   poetry install``
    ```
 
 4. **Set Up Environment Variables:**
