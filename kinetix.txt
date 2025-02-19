@@ -1,0 +1,1665 @@
+{'engine_statement': 'We use the jax2d physics engine to simulate the dynamics '
+                     'of the environment.',
+ 'env_entry_point': 'kinetix.environment.env.BasePhysicsEnv:KinetixEntityMultiDiscreteActions',
+ 'env_name': 'Kinetix',
+ 'env_source_files': ['kinetix/environment/env_state.py',
+                      'kinetix/environment/env.py',
+                      'kinetix/environment/ued/distributions.py',
+                      'kinetix/environment/ued/ued_state.py',
+                      'kinetix/environment/ued/util.py'],
+ 'env_var': 'env_state',
+ 'env_var_type': 'EnvState',
+ 'init_editors': True,
+ 'llm_name': 'o3-mini',
+ 'max_correction_retry': 5,
+ 'max_tokens': 4096,
+ 'out_dir': 'editors/kinetix',
+ 'out_filename': 'editor-o3-mini.py',
+ 'temperature': 1.0,
+ 'verbose': True}
+*************** kinetix/environment/env_state.py ***************
+from dataclasses import field
+import jax.numpy as jnp
+from flax import struct
+
+from jax2d.sim_state import SimState, SimParams, StaticSimParams
+
+
+@struct.dataclass
+class EnvState(SimState):
+    thruster_bindings: jnp.ndarray
+    motor_bindings: jnp.ndarray
+    motor_auto: jnp.ndarray
+
+    polygon_shape_roles: jnp.ndarray
+    circle_shape_roles: jnp.ndarray
+
+    polygon_highlighted: jnp.ndarray
+    circle_highlighted: jnp.ndarray
+
+    polygon_densities: jnp.ndarray
+    circle_densities: jnp.ndarray
+
+    timestep: int = 0
+
+
+@struct.dataclass
+class EnvParams(SimParams):
+    max_timesteps: int = 256
+    pixels_per_unit: int = 100
+    dense_reward_scale: float = 0.1
+    num_shape_roles: int = 4
+
+
+@struct.dataclass
+class StaticEnvParams(StaticSimParams):
+    screen_dim: tuple[int, int] = (500, 500)
+    downscale: int = 4
+
+    frame_skip: int = 1
+    max_shape_size: int = 2
+
+    num_motor_bindings: int = 4
+    num_thruster_bindings: int = 2
+
+*************** kinetix/environment/env.py ***************
+import functools
+from functools import partial
+from typing import Any, Dict, Optional, Tuple, Union
+
+import chex
+import jax
+import jax.numpy as jnp
+import numpy as np
+from chex._src.pytypes import PRNGKey
+from gymnax.environments import environment, spaces
+from gymnax.environments.environment import TEnvParams, TEnvState
+from gymnax.environments.spaces import Space
+from jax import lax
+
+from jax2d.engine import PhysicsEngine, create_empty_sim, recalculate_mass_and_inertia
+from jax2d.sim_state import CollisionManifold, SimState
+from kinetix.environment.env_state import EnvParams, EnvState, StaticEnvParams
+from kinetix.environment.wrappers import (
+    AutoReplayWrapper,
+    AutoResetWrapper,
+    UnderspecifiedToGymnaxWrapper,
+    DenseRewardWrapper,
+    LogWrapper,
+)
+
+from kinetix.pcg.pcg import env_state_to_pcg_state, sample_pcg_state
+from kinetix.pcg.pcg_state import PCGState
+from kinetix.render.renderer_symbolic_entity import make_render_entities
+from kinetix.render.renderer_pixels import make_render_pixels, make_render_pixels_rl
+from kinetix.render.renderer_symbolic_flat import make_render_symbolic
+
+from kinetix.util.saving import load_pcg_state_pickle
+from jaxued.environments import UnderspecifiedEnv
+
+
+def create_empty_env(static_env_params):
+    sim_state = create_empty_sim(static_env_params)
+    return EnvState(
+        timestep=0,
+        thruster_bindings=jnp.zeros(static_env_params.num_thrusters, dtype=jnp.int32),
+        motor_bindings=jnp.zeros(static_env_params.num_joints, dtype=jnp.int32),
+        motor_auto=jnp.zeros(static_env_params.num_joints, dtype=bool),
+        polygon_shape_roles=jnp.zeros(static_env_params.num_polygons, dtype=jnp.int32),
+        circle_shape_roles=jnp.zeros(static_env_params.num_circles, dtype=jnp.int32),
+        polygon_highlighted=jnp.zeros(static_env_params.num_polygons, dtype=bool),
+        circle_highlighted=jnp.zeros(static_env_params.num_circles, dtype=bool),
+        polygon_densities=jnp.ones(static_env_params.num_polygons, dtype=jnp.float32),
+        circle_densities=jnp.ones(static_env_params.num_circles, dtype=jnp.float32),
+        **sim_state.__dict__,
+    )
+
+
+def index_motor_actions(
+    action: jnp.ndarray,
+    state: EnvState,
+    clip_min=None,
+    clip_max=None,
+):
+    # Expand the motor actions to all joints with the same colour
+    return jnp.clip(action[state.motor_bindings], clip_min, clip_max)
+
+
+def index_thruster_actions(
+    action: jnp.ndarray,
+    state: EnvState,
+    clip_min=None,
+    clip_max=None,
+):
+    # Expand the thruster actions to all joints with the same colour
+    return jnp.clip(action[state.thruster_bindings], clip_min, clip_max)
+
+
+def convert_continuous_actions(
+    action: jnp.ndarray, state: SimState, static_env_params: StaticEnvParams, params: EnvParams
+):
+    action_motor = action[: static_env_params.num_motor_bindings]
+    action_thruster = action[static_env_params.num_motor_bindings :]
+    action_motor = index_motor_actions(action_motor, state, -1, 1)
+    action_thruster = index_thruster_actions(action_thruster, state, 0, 1)
+
+    action_motor = jnp.where(state.motor_auto, jnp.ones_like(action_motor), action_motor)
+
+    action_to_perform = jnp.concatenate([action_motor, action_thruster], axis=0)
+    return action_to_perform
+
+
+def convert_discrete_actions(action: int, state: SimState, static_env_params: StaticEnvParams, params: EnvParams):
+    # so, we have
+    # 0 to NJC * 2 - 1: Joint Actions
+    # NJC * 2: No-op
+    # NJC * 2 + 1 to NJC * 2 + 1 + NTC - 1: Thruster Actions
+    # action here is a categorical action
+    which_idx = action // 2
+    which_dir = action % 2
+    actions = (
+        jnp.zeros(static_env_params.num_motor_bindings + static_env_params.num_thruster_bindings)
+        .at[which_idx]
+        .set(which_dir * 2 - 1)
+    )
+    actions = actions * (
+        1 - (action >= static_env_params.num_motor_bindings * 2)
+    )  # if action is the last one, set it to zero, i.e., a no-op. Alternatively, if the action is larger than NJC * 2, then it is a thruster action and we shouldn't control the joints.
+
+    actions = jax.lax.select(
+        action > static_env_params.num_motor_bindings * 2,
+        actions.at[action - static_env_params.num_motor_bindings * 2 - 1 + static_env_params.num_motor_bindings].set(1),
+        actions,
+    )
+
+    action_motor = index_motor_actions(actions[: static_env_params.num_motor_bindings], state, -1, 1)
+    action_motor = jnp.where(state.motor_auto, jnp.ones_like(action_motor), action_motor)
+    action_thruster = index_thruster_actions(actions[static_env_params.num_motor_bindings :], state, 0, 1)
+    action_to_perform = jnp.concatenate([action_motor, action_thruster], axis=0)
+    return action_to_perform
+
+
+def convert_multi_discrete_actions(
+    action: jnp.ndarray, state: SimState, static_env_params: StaticEnvParams, params: EnvParams
+):
+    # Comes in with each action being in {0,1,2} for joints and {0,1} for thrusters
+    # Convert to [-1., 1.] for joints and [0., 1.] for thrusters
+
+    def _single_motor_action(act):
+        return jax.lax.switch(
+            act,
+            [lambda: 0.0, lambda: 1.0, lambda: -1.0],
+        )
+
+    def _single_thruster_act(act):
+        return jax.lax.select(
+            act == 0,
+            0.0,
+            1.0,
+        )
+
+    action_motor = jax.vmap(_single_motor_action)(action[: static_env_params.num_motor_bindings])
+    action_thruster = jax.vmap(_single_thruster_act)(action[static_env_params.num_motor_bindings :])
+
+    action_motor = index_motor_actions(action_motor, state, -1, 1)
+    action_thruster = index_thruster_actions(action_thruster, state, 0, 1)
+
+    action_motor = jnp.where(state.motor_auto, jnp.ones_like(action_motor), action_motor)
+
+    action_to_perform = jnp.concatenate([action_motor, action_thruster], axis=0)
+    return action_to_perform
+
+
+def make_kinetix_env_from_args(
+    obs_type, action_type, reset_type, static_env_params=None, auto_reset_fn=None, dense_reward_scale=1.0
+):
+    if obs_type == "entity":
+        if action_type == "multidiscrete":
+            env = KinetixEntityMultiDiscreteActions(should_do_pcg_reset=True, static_env_params=static_env_params)
+        elif action_type == "discrete":
+            env = KinetixEntityDiscreteActions(should_do_pcg_reset=True, static_env_params=static_env_params)
+        elif action_type == "continuous":
+            env = KinetixEntityContinuousActions(should_do_pcg_reset=True, static_env_params=static_env_params)
+        else:
+            raise ValueError(f"Unknown action type: {action_type}")
+
+    elif obs_type == "symbolic":
+        if action_type == "multidiscrete":
+            env = KinetixSymbolicMultiDiscreteActions(should_do_pcg_reset=True, static_env_params=static_env_params)
+        elif action_type == "discrete":
+            env = KinetixSymbolicDiscreteActions(should_do_pcg_reset=True, static_env_params=static_env_params)
+        elif action_type == "continuous":
+            env = KinetixSymbolicContinuousActions(should_do_pcg_reset=True, static_env_params=static_env_params)
+        else:
+            raise ValueError(f"Unknown action type: {action_type}")
+
+    elif obs_type == "pixels":
+        if action_type == "multidiscrete":
+            env = KinetixPixelsMultiDiscreteActions(should_do_pcg_reset=True, static_env_params=static_env_params)
+        elif action_type == "discrete":
+            env = KinetixPixelsDiscreteActions(should_do_pcg_reset=True, static_env_params=static_env_params)
+        elif action_type == "continuous":
+            env = KinetixPixelsContinuousActions(should_do_pcg_reset=True, static_env_params=static_env_params)
+        else:
+            raise ValueError(f"Unknown action type: {action_type}")
+
+    elif obs_type == "blind":
+        if action_type == "discrete":
+            env = KinetixBlindDiscreteActions(should_do_pcg_reset=True, static_env_params=static_env_params)
+        elif action_type == "continuous":
+            env = KinetixBlindContinuousActions(should_do_pcg_reset=True, static_env_params=static_env_params)
+        else:
+            raise ValueError(f"Unknown action type: {action_type}")
+
+    else:
+        raise ValueError(f"Unknown observation type: {obs_type}")
+
+    # Wrap
+    if reset_type == "replay":
+        env = AutoReplayWrapper(env)
+    elif reset_type == "reset":
+        env = AutoResetWrapper(env, sample_level=auto_reset_fn)
+    else:
+        raise ValueError(f"Unknown reset type {reset_type}")
+
+    env = UnderspecifiedToGymnaxWrapper(env)
+    env = DenseRewardWrapper(env, dense_reward_scale=dense_reward_scale)
+    env = LogWrapper(env)
+
+    return env
+
+
+def make_kinetix_env_from_name(name, static_env_params=None):
+    kwargs = dict(filename_to_use_for_reset=None, should_do_pcg_reset=True, static_env_params=static_env_params)
+    values = {
+        "Kinetix-Pixels-MultiDiscrete-v1": KinetixPixelsMultiDiscreteActions,
+        "Kinetix-Pixels-Discrete-v1": KinetixPixelsDiscreteActions,
+        "Kinetix-Pixels-Continuous-v1": KinetixPixelsContinuousActions,
+        "Kinetix-Symbolic-MultiDiscrete-v1": KinetixSymbolicMultiDiscreteActions,
+        "Kinetix-Symbolic-Discrete-v1": KinetixSymbolicDiscreteActions,
+        "Kinetix-Symbolic-Continuous-v1": KinetixSymbolicContinuousActions,
+        "Kinetix-Blind-Discrete-v1": KinetixBlindDiscreteActions,
+        "Kinetix-Blind-Continuous-v1": KinetixBlindContinuousActions,
+        "Kinetix-Entity-Discrete-v1": KinetixEntityDiscreteActions,
+        "Kinetix-Entity-Continuous-v1": KinetixEntityContinuousActions,
+        "Kinetix-Entity-MultiDiscrete-v1": KinetixEntityMultiDiscreteActions,
+    }
+
+    return values[name](**kwargs)
+
+
+class ObservationSpace:
+    def __init__(self, params: EnvParams, static_env_params: StaticEnvParams):
+        pass
+
+    def get_obs(self, state: EnvState):
+        raise NotImplementedError()
+
+    def observation_space(self, params: EnvParams):
+        raise NotImplementedError()
+
+
+class PixelObservations(ObservationSpace):
+    def __init__(self, params: EnvParams, static_env_params: StaticEnvParams):
+        self.render_function = make_render_pixels_rl(params, static_env_params)
+        self.static_env_params = static_env_params
+
+    def get_obs(self, state: EnvState):
+        return self.render_function(state)
+
+    def observation_space(self, params: EnvParams) -> spaces.Box:
+        return spaces.Box(
+            0.0,
+            1.0,
+            tuple(a // self.static_env_params.downscale for a in self.static_env_params.screen_dim) + (3,),
+            dtype=jnp.float32,
+        )
+
+
+class SymbolicObservations(ObservationSpace):
+    def __init__(self, params: EnvParams, static_env_params: StaticEnvParams):
+        self.render_function = make_render_symbolic(params, static_env_params)
+
+    def get_obs(self, state: EnvState):
+        return self.render_function(state)
+
+
+class EntityObservations(ObservationSpace):
+    def __init__(self, params: EnvParams, static_env_params: StaticEnvParams):
+        self.render_function = make_render_entities(params, static_env_params)
+
+    def get_obs(self, state: EnvState):
+        return self.render_function(state)
+
+
+class BlindObservations(ObservationSpace):
+    def __init__(self, params: EnvParams, static_env_params: StaticEnvParams):
+        self.params = params
+
+    def get_obs(self, state: EnvState):
+        return jax.nn.one_hot(state.timestep, self.params.max_timesteps + 1)
+
+
+def get_observation_space_from_name(name: str, params, static_env_params):
+    if "Pixels" in name:
+        return PixelObservations(params, static_env_params)
+    elif "Symbolic" in name:
+        return SymbolicObservations(params, static_env_params)
+    elif "Entity" in name:
+        return EntityObservations(params, static_env_params)
+    if "Blind" in name:
+        return BlindObservations(params, static_env_params)
+    else:
+        raise ValueError(f"Unknown name {name}")
+
+
+class ActionType:
+    def __init__(self, params: EnvParams, static_env_params: StaticEnvParams):
+        # This is the processed, unified action space size that is shared with all action types
+        # 1 dim per motor and thruster
+        self.unified_action_space_size = static_env_params.num_motor_bindings + static_env_params.num_thruster_bindings
+
+    def action_space(self, params: Optional[EnvParams] = None) -> Union[spaces.Discrete, spaces.Box]:
+        raise NotImplementedError()
+
+    def process_action(self, action: jnp.ndarray, state: EnvState, static_env_params: StaticEnvParams) -> jnp.ndarray:
+        raise NotImplementedError()
+
+    def noop_action(self) -> jnp.ndarray:
+        raise NotImplementedError()
+
+    def random_action(self, rng: chex.PRNGKey):
+        raise NotImplementedError()
+
+
+class ActionTypeContinuous(ActionType):
+    def __init__(self, params: EnvParams, static_env_params: StaticEnvParams):
+        super().__init__(params, static_env_params)
+
+        self.params = params
+        self.static_env_params = static_env_params
+
+    def action_space(self, params: EnvParams | None = None) -> spaces.Discrete | spaces.Box:
+        return spaces.Box(
+            low=jnp.ones(self.unified_action_space_size) * -1.0,
+            high=jnp.ones(self.unified_action_space_size) * 1.0,
+            shape=(self.unified_action_space_size,),
+        )
+
+    def process_action(self, action: PRNGKey, state: EnvState, static_env_params: StaticEnvParams) -> PRNGKey:
+        return convert_continuous_actions(action, state, static_env_params, self.params)
+
+    def noop_action(self) -> jnp.ndarray:
+        return jnp.zeros(self.unified_action_space_size, dtype=jnp.float32)
+
+    def random_action(self, rng: chex.PRNGKey) -> jnp.ndarray:
+        actions = jax.random.uniform(rng, shape=(self.unified_action_space_size,), minval=-1.0, maxval=1.0)
+        # Motors between -1 and 1, thrusters between 0 and 1
+        actions = actions.at[self.static_env_params.num_motor_bindings :].set(
+            jnp.abs(actions[self.static_env_params.num_motor_bindings :])
+        )
+
+        return actions
+
+
+class ActionTypeDiscrete(ActionType):
+    def __init__(self, params: EnvParams, static_env_params: StaticEnvParams):
+        super().__init__(params, static_env_params)
+
+        self.params = params
+        self.static_env_params = static_env_params
+
+        self._n_actions = (
+            self.static_env_params.num_motor_bindings * 2 + 1 + self.static_env_params.num_thruster_bindings
+        )
+
+    def action_space(self, params: Optional[EnvParams] = None) -> spaces.Discrete:
+        return spaces.Discrete(self._n_actions)
+
+    def process_action(self, action: jnp.ndarray, state: EnvState, static_env_params: StaticEnvParams) -> jnp.ndarray:
+        return convert_discrete_actions(action, state, static_env_params, self.params)
+
+    def noop_action(self) -> int:
+        return self.static_env_params.num_motor_bindings * 2
+
+    def random_action(self, rng: chex.PRNGKey):
+        return jax.random.randint(rng, shape=(), minval=0, maxval=self._n_actions)
+
+
+class MultiDiscrete(Space):
+    def __init__(self, n, number_of_dims_per_distribution):
+        self.number_of_dims_per_distribution = number_of_dims_per_distribution
+        self.n = n
+        self.shape = (number_of_dims_per_distribution.shape[0],)
+        self.dtype = jnp.int_
+
+    def sample(self, rng: chex.PRNGKey) -> chex.Array:
+        """Sample random action uniformly from set of categorical choices."""
+        uniform_sample = jax.random.uniform(rng, shape=self.shape) * self.number_of_dims_per_distribution
+        md_dist = jnp.floor(uniform_sample)
+        return md_dist.astype(self.dtype)
+
+    def contains(self, x) -> jnp.ndarray:
+        """Check whether specific object is within space."""
+        range_cond = jnp.logical_and(x >= 0, (x < self.number_of_dims_per_distribution).all())
+        return range_cond
+
+
+class ActionTypeMultiDiscrete(ActionType):
+    def __init__(self, params: EnvParams, static_env_params: StaticEnvParams):
+        super().__init__(params, static_env_params)
+
+        self.params = params
+        self.static_env_params = static_env_params
+        # This is the action space that will be used internally by an agent
+        # 3 dims per motor (foward, backward, off) and 2 per thruster (on, off)
+        self.n_hot_action_space_size = (
+            self.static_env_params.num_motor_bindings * 3 + self.static_env_params.num_thruster_bindings * 2
+        )
+
+        def _make_sample_random():
+            minval = jnp.zeros(self.unified_action_space_size, dtype=jnp.int32)
+            maxval = jnp.ones(self.unified_action_space_size, dtype=jnp.int32) * 3
+            maxval = maxval.at[self.static_env_params.num_motor_bindings :].set(2)
+
+            def random(rng):
+                return jax.random.randint(rng, shape=(self.unified_action_space_size,), minval=minval, maxval=maxval)
+
+            return random
+
+        self._random = _make_sample_random
+
+        self.number_of_dims_per_distribution = jnp.concatenate(
+            [
+                np.ones(self.static_env_params.num_motor_bindings) * 3,
+                np.ones(self.static_env_params.num_thruster_bindings) * 2,
+            ]
+        ).astype(np.int32)
+
+    def action_space(self, params: Optional[EnvParams] = None) -> MultiDiscrete:
+        return MultiDiscrete(self.n_hot_action_space_size, self.number_of_dims_per_distribution)
+
+    def process_action(self, action: jnp.ndarray, state: EnvState, static_env_params: StaticEnvParams) -> jnp.ndarray:
+        return convert_multi_discrete_actions(action, state, static_env_params, self.params)
+
+    def noop_action(self):
+        return jnp.zeros(self.unified_action_space_size, dtype=jnp.int32)
+
+    def random_action(self, rng: chex.PRNGKey):
+        return self._random()(rng)
+
+
+class BasePhysicsEnv(UnderspecifiedEnv):
+    def __init__(
+        self,
+        action_type: ActionType,
+        observation_space: ObservationSpace,
+        static_env_params: StaticEnvParams,
+        target_index: int = 0,
+        filename_to_use_for_reset=None,  # "worlds/games/bipedal_v1",
+        should_do_pcg_reset: bool = False,
+    ):
+        super().__init__()
+        self.target_index = target_index
+        self.static_env_params = static_env_params
+        self.action_type = action_type
+        self._observation_space = observation_space
+        self.physics_engine = PhysicsEngine(self.static_env_params)
+        self.should_do_pcg_reset = should_do_pcg_reset
+
+        self.filename_to_use_for_reset = filename_to_use_for_reset
+        if self.filename_to_use_for_reset is not None:
+            self.reset_state = load_pcg_state_pickle(filename_to_use_for_reset)
+        else:
+            env_state = create_empty_env(self.static_env_params)
+            self.reset_state = env_state_to_pcg_state(env_state)
+
+    # Action / Observations
+    def action_space(self, params: Optional[EnvParams] = None) -> Union[spaces.Discrete, spaces.Box]:
+        return self.action_type.action_space(params)
+
+    def observation_space(self, params: Any):
+        return self._observation_space.observation_space(params)
+
+    def get_obs(self, state: EnvState):
+        return self._observation_space.get_obs(state)
+
+    def step_env(self, rng, state, action: jnp.ndarray, params):
+        action_processed = self.action_type.process_action(action, state, self.static_env_params)
+        return self.engine_step(state, action_processed, params)
+
+    def reset_env(self, rng, params):
+        # Wrap in AutoResetWrapper or AutoReplayWrapper
+        raise NotImplementedError()
+
+    def reset_env_to_level(self, rng, state: EnvState, params):
+        if isinstance(state, PCGState):
+            return self.reset_env_to_pcg_level(rng, state, params)
+        return self.get_obs(state), state
+
+    def reset_env_to_pcg_level(self, rng, state: PCGState, params):
+        env_state = sample_pcg_state(rng, state, params, self.static_env_params)
+        return self.get_obs(env_state), env_state
+
+    @property
+    def default_params(self) -> EnvParams:
+        return EnvParams()
+
+    @staticmethod
+    def default_static_params() -> StaticEnvParams:
+        return StaticEnvParams()
+
+    def compute_reward_info(
+        self, state: EnvState, manifolds: tuple[CollisionManifold, CollisionManifold, CollisionManifold]
+    ) -> float:
+        def get_active(manifold: CollisionManifold) -> jnp.ndarray:
+            return manifold.active
+
+        def dist(a, b):
+            return jnp.linalg.norm(a - b)
+
+        @jax.vmap
+        def dist_rr(idxa, idxb):
+            return dist(state.polygon.position[idxa], state.polygon.position[idxb])
+
+        @jax.vmap
+        def dist_cc(idxa, idxb):
+            return dist(state.circle.position[idxa], state.circle.position[idxb])
+
+        @jax.vmap
+        def dist_cr(idxa, idxb):
+            return dist(state.circle.position[idxa], state.polygon.position[idxb])
+
+        info = {
+            "GoalR": False,
+        }
+        negative_reward = 0
+        reward = 0
+        distance = 0
+        rs = state.polygon_shape_roles * state.polygon.active
+        cs = state.circle_shape_roles * state.circle.active
+
+        # Polygon Polygon
+        r1 = rs[self.physics_engine.poly_poly_pairs[:, 0]]
+        r2 = rs[self.physics_engine.poly_poly_pairs[:, 1]]
+        reward += ((r1 * r2 == 2) * get_active(manifolds[0])).sum()
+        negative_reward += ((r1 * r2 == 3) * get_active(manifolds[0])).sum()
+
+        distance += (
+            (r1 * r2 == 2)
+            * dist_rr(self.physics_engine.poly_poly_pairs[:, 0], self.physics_engine.poly_poly_pairs[:, 1])
+        ).sum()
+
+        # Circle Polygon
+        c1 = cs[self.physics_engine.circle_poly_pairs[:, 0]]
+        r2 = rs[self.physics_engine.circle_poly_pairs[:, 1]]
+        reward += ((c1 * r2 == 2) * get_active(manifolds[1])).sum()
+        negative_reward += ((c1 * r2 == 3) * get_active(manifolds[1])).sum()
+
+        t = dist_cr(self.physics_engine.circle_poly_pairs[:, 0], self.physics_engine.circle_poly_pairs[:, 1])
+        distance += ((c1 * r2 == 2) * t).sum()
+
+        # Circle Circle
+        c1 = cs[self.physics_engine.circle_circle_pairs[:, 0]]
+        c2 = cs[self.physics_engine.circle_circle_pairs[:, 1]]
+        reward += ((c1 * c2 == 2) * get_active(manifolds[2])).sum()
+        negative_reward += ((c1 * c2 == 3) * get_active(manifolds[2])).sum()
+
+        distance += (
+            (c1 * c2 == 2)
+            * dist_cc(self.physics_engine.circle_circle_pairs[:, 0], self.physics_engine.circle_circle_pairs[:, 1])
+        ).sum()
+
+        reward = jax.lax.select(
+            negative_reward > 0,
+            -1.0,
+            jax.lax.select(
+                reward > 0,
+                1.0,
+                0.0,
+            ),
+        )
+
+        info["GoalR"] = reward > 0
+        info["distance"] = distance
+        return reward, info
+
+    @partial(jax.jit, static_argnums=(0,))
+    def engine_step(self, env_state, action_to_perform, env_params):
+        def _single_step(env_state, unused):
+            env_state, mfolds = self.physics_engine.step(
+                env_state,
+                env_params,
+                action_to_perform,
+            )
+
+            reward, info = self.compute_reward_info(env_state, mfolds)
+
+            done = reward != 0
+
+            info = {"rr_manifolds": None, "cr_manifolds": None} | info
+
+            return env_state, (reward, done, info)
+
+        env_state, (rewards, dones, infos) = jax.lax.scan(
+            _single_step, env_state, xs=None, length=self.static_env_params.frame_skip
+        )
+        env_state = env_state.replace(timestep=env_state.timestep + 1)
+
+        reward = rewards.max()
+        done = dones.sum() > 0 | jax.tree.reduce(
+            jnp.logical_or, jax.tree.map(lambda x: jnp.isnan(x).any(), env_state), False
+        )
+        done |= env_state.timestep >= env_params.max_timesteps
+
+        info = jax.tree.map(lambda x: x[-1], infos)
+
+        return (
+            lax.stop_gradient(self.get_obs(env_state)),
+            lax.stop_gradient(env_state),
+            reward,
+            done,
+            info,
+        )
+
+    @functools.partial(jax.jit, static_argnums=(0,))
+    def step(
+        self,
+        key: chex.PRNGKey,
+        state: TEnvState,
+        action: Union[int, float, chex.Array],
+        params: Optional[TEnvParams] = None,
+    ) -> Tuple[chex.Array, TEnvState, jnp.ndarray, jnp.ndarray, Dict[Any, Any]]:
+        raise NotImplementedError()
+
+
+class KinetixPixelsDiscreteActions(BasePhysicsEnv):
+    def __init__(
+        self,
+        static_env_params: StaticEnvParams | None = None,
+        **kwargs,
+    ):
+
+        params = self.default_params
+        static_env_params = static_env_params or self.default_static_params()
+        super().__init__(
+            action_type=ActionTypeDiscrete(params, static_env_params),
+            observation_space=PixelObservations(params, static_env_params),
+            static_env_params=static_env_params,
+            **kwargs,
+        )
+
+    @property
+    def name(self) -> str:
+        return "Kinetix-Pixels-Discrete-v1"
+
+
+class KinetixPixelsContinuousActions(BasePhysicsEnv):
+    def __init__(
+        self,
+        static_env_params: StaticEnvParams | None = None,
+        **kwargs,
+    ):
+        params = self.default_params
+        static_env_params = static_env_params or self.default_static_params()
+        super().__init__(
+            action_type=ActionTypeContinuous(params, static_env_params),
+            observation_space=PixelObservations(params, static_env_params),
+            static_env_params=static_env_params,
+            **kwargs,
+        )
+
+    @property
+    def name(self) -> str:
+        return "Kinetix-Pixels-Continuous-v1"
+
+
+class KinetixPixelsMultiDiscreteActions(BasePhysicsEnv):
+    def __init__(
+        self,
+        static_env_params: StaticEnvParams | None = None,
+        **kwargs,
+    ):
+        params = self.default_params
+        static_env_params = static_env_params or self.default_static_params()
+        super().__init__(
+            action_type=ActionTypeMultiDiscrete(params, static_env_params),
+            observation_space=PixelObservations(params, static_env_params),
+            static_env_params=static_env_params,
+            **kwargs,
+        )
+
+    @property
+    def name(self) -> str:
+        return "Kinetix-Pixels-MultiDiscrete-v1"
+
+
+class KinetixSymbolicDiscreteActions(BasePhysicsEnv):
+    def __init__(
+        self,
+        static_env_params: StaticEnvParams | None = None,
+        **kwargs,
+    ):
+        params = self.default_params
+        static_env_params = static_env_params or self.default_static_params()
+        super().__init__(
+            action_type=ActionTypeDiscrete(params, static_env_params),
+            observation_space=SymbolicObservations(params, static_env_params),
+            static_env_params=static_env_params,
+            **kwargs,
+        )
+
+    @property
+    def name(self) -> str:
+        return "Kinetix-Symbolic-Discrete-v1"
+
+
+class KinetixSymbolicContinuousActions(BasePhysicsEnv):
+    def __init__(
+        self,
+        static_env_params: StaticEnvParams | None = None,
+        **kwargs,
+    ):
+        params = self.default_params
+        static_env_params = static_env_params or self.default_static_params()
+        super().__init__(
+            action_type=ActionTypeContinuous(params, static_env_params),
+            observation_space=SymbolicObservations(params, static_env_params),
+            static_env_params=static_env_params,
+            **kwargs,
+        )
+
+    @property
+    def name(self) -> str:
+        return "Kinetix-Symbolic-Continuous-v1"
+
+
+class KinetixSymbolicMultiDiscreteActions(BasePhysicsEnv):
+    def __init__(
+        self,
+        static_env_params: StaticEnvParams | None = None,
+        **kwargs,
+    ):
+        params = self.default_params
+        static_env_params = static_env_params or self.default_static_params()
+        super().__init__(
+            action_type=ActionTypeMultiDiscrete(params, static_env_params),
+            observation_space=SymbolicObservations(params, static_env_params),
+            static_env_params=static_env_params,
+            **kwargs,
+        )
+
+    @property
+    def name(self) -> str:
+        return "Kinetix-Symbolic-MultiDiscrete-v1"
+
+
+class KinetixEntityDiscreteActions(BasePhysicsEnv):
+    def __init__(
+        self,
+        static_env_params: StaticEnvParams | None = None,
+        **kwargs,
+    ):
+        params = self.default_params
+        static_env_params = static_env_params or self.default_static_params()
+        super().__init__(
+            action_type=ActionTypeDiscrete(params, static_env_params),
+            observation_space=EntityObservations(params, static_env_params),
+            static_env_params=static_env_params,
+            **kwargs,
+        )
+
+    @property
+    def name(self) -> str:
+        return "Kinetix-Entity-Discrete-v1"
+
+
+class KinetixEntityContinuousActions(BasePhysicsEnv):
+    def __init__(
+        self,
+        static_env_params: StaticEnvParams | None = None,
+        **kwargs,
+    ):
+        params = self.default_params
+        static_env_params = static_env_params or self.default_static_params()
+        super().__init__(
+            action_type=ActionTypeContinuous(params, static_env_params),
+            observation_space=EntityObservations(params, static_env_params),
+            static_env_params=static_env_params,
+            **kwargs,
+        )
+
+    @property
+    def name(self) -> str:
+        return "Kinetix-Entity-Continuous-v1"
+
+
+class KinetixEntityMultiDiscreteActions(BasePhysicsEnv):
+    def __init__(
+        self,
+        static_env_params: StaticEnvParams | None = None,
+        **kwargs,
+    ):
+        params = self.default_params
+        static_env_params = static_env_params or self.default_static_params()
+        super().__init__(
+            action_type=ActionTypeMultiDiscrete(params, static_env_params),
+            observation_space=EntityObservations(params, static_env_params),
+            static_env_params=static_env_params,
+            **kwargs,
+        )
+
+    @property
+    def name(self) -> str:
+        return "Kinetix-Entity-MultiDiscrete-v1"
+
+
+class KinetixBlindDiscreteActions(BasePhysicsEnv):
+    def __init__(
+        self,
+        static_env_params: StaticEnvParams | None = None,
+        **kwargs,
+    ):
+        params = self.default_params
+        static_env_params = static_env_params or self.default_static_params()
+        super().__init__(
+            action_type=ActionTypeDiscrete(params, static_env_params),
+            observation_space=BlindObservations(params, static_env_params),
+            static_env_params=static_env_params,
+            **kwargs,
+        )
+
+    @property
+    def name(self) -> str:
+        return "Kinetix-Blind-Discrete-v1"
+
+
+class KinetixBlindContinuousActions(BasePhysicsEnv):
+    def __init__(
+        self,
+        static_env_params: StaticEnvParams | None = None,
+        **kwargs,
+    ):
+        params = self.default_params
+        static_env_params = static_env_params or self.default_static_params()
+        super().__init__(
+            action_type=ActionTypeContinuous(params, static_env_params),
+            observation_space=BlindObservations(params, static_env_params),
+            static_env_params=static_env_params,
+            **kwargs,
+        )
+
+    @property
+    def name(self) -> str:
+        return "Kinetix-Blind-Continuous-v1"
+
+*************** kinetix/environment/ued/distributions.py ***************
+from functools import partial
+import math
+
+import chex
+import jax
+import jax.numpy as jnp
+from flax.serialization import to_state_dict
+from jax2d.engine import (
+    calculate_collision_matrix,
+    calc_inverse_mass_polygon,
+    calc_inverse_mass_circle,
+    calc_inverse_inertia_circle,
+    calc_inverse_inertia_polygon,
+    recalculate_mass_and_inertia,
+    select_shape,
+    PhysicsEngine,
+)
+from jax2d.sim_state import SimState, RigidBody, Joint, Thruster
+from jax2d.maths import rmat
+from kinetix.environment.env_state import EnvParams, EnvState, StaticEnvParams
+from kinetix.environment.ued.mutators import (
+    mutate_add_connected_shape_proper,
+    mutate_add_shape,
+    mutate_add_connected_shape,
+    mutate_add_thruster,
+)
+from kinetix.environment.ued.ued_state import UEDParams
+from kinetix.environment.ued.util import (
+    get_role,
+    sample_dimensions,
+    is_space_for_shape,
+    random_position_on_polygon,
+    random_position_on_circle,
+    are_there_shapes_present,
+    is_space_for_joint,
+)
+from kinetix.environment.utils import permute_state
+from kinetix.util.saving import load_world_state_pickle
+from flax import struct
+from kinetix.environment.env import create_empty_env
+
+
+@partial(jax.jit, static_argnums=(1, 3, 5, 6, 7, 8, 9, 10))
+def create_vmapped_filtered_distribution(
+    rng,
+    level_sampler,
+    env_params: EnvParams,
+    static_env_params: StaticEnvParams,
+    ued_params: UEDParams,
+    n_samples: int,
+    env,
+    do_filter_levels: bool,
+    level_filter_sample_ratio: int,
+    env_size_name: str,
+    level_filter_n_steps: int,
+):
+
+    if do_filter_levels and level_filter_n_steps > 0:
+        sample_ratio = level_filter_sample_ratio
+        n_unfiltered_samples = sample_ratio * n_samples
+        rng, _rng = jax.random.split(rng)
+        _rngs = jax.random.split(_rng, n_unfiltered_samples)
+
+        # unfiltered_levels = jax.vmap(level_sampler, in_axes=(0, None, None, None, None))(
+        #     _rngs, env_params, static_env_params, ued_params, env_size_name
+        # )
+        unfiltered_levels = jax.vmap(level_sampler, in_axes=(0,))(_rngs)
+        #
+
+        # No-op filtering
+
+        def _noop_step(states, rng):
+            rng, _rng = jax.random.split(rng)
+            _rngs = jax.random.split(_rng, n_unfiltered_samples)
+
+            action = jnp.zeros((n_unfiltered_samples, *env.action_space(env_params).shape), dtype=jnp.int32)
+
+            obs, states, reward, done, info = jax.vmap(env.step, in_axes=(0, 0, 0, None))(
+                _rngs, states, action, env_params
+            )
+
+            return states, (done, reward)
+
+        # Wrap levels
+        rng, _rng = jax.random.split(rng)
+        _rngs = jax.random.split(_rng, n_unfiltered_samples)
+        obsv, unfiltered_levels_wrapped = jax.vmap(env.reset_to_level, in_axes=(0, 0, None))(
+            _rngs, unfiltered_levels, env_params
+        )
+
+        rng, _rng = jax.random.split(rng)
+        _rngs = jax.random.split(_rng, level_filter_n_steps)
+        _, (done, rewards) = jax.lax.scan(_noop_step, unfiltered_levels_wrapped, xs=_rngs)
+
+        done_indexes = jnp.argmax(done, axis=0)
+        done_rewards = rewards[done_indexes, jnp.arange(n_unfiltered_samples)]
+
+        noop_solved_indexes = done_rewards > 0.5
+        p = noop_solved_indexes * 0.001 + (1 - noop_solved_indexes) * 1.0
+        p /= p.sum()
+
+        rng, _rng = jax.random.split(rng)
+        level_indexes = jax.random.choice(
+            _rng, jnp.arange(n_unfiltered_samples), shape=(n_samples,), replace=False, p=p
+        )
+
+        levels = jax.tree.map(lambda x: x[level_indexes], unfiltered_levels)
+
+    else:
+        rng, _rng = jax.random.split(rng)
+        _rngs = jax.random.split(_rng, n_samples)
+
+        levels = jax.vmap(level_sampler, in_axes=(0,))(_rngs)
+
+    return levels
+
+
+@partial(jax.jit, static_argnums=(1, 3, 4, 5))
+def sample_kinetix_level(
+    rng,
+    engine: PhysicsEngine,
+    env_params: EnvParams,
+    static_env_params: StaticEnvParams,
+    ued_params: UEDParams,
+    env_size_name: str = "l",
+):
+    rng, _rng = jax.random.split(rng)
+    _rngs = jax.random.split(_rng, 12)
+
+    small_force_no_fixate = env_size_name == "s"
+
+    # Start with empty state
+    state = create_empty_env(static_env_params)
+
+    # Set the floor
+    prob_of_floor_colour = jnp.array(
+        [
+            ued_params.floor_prob_normal,
+            ued_params.floor_prob_green,
+            ued_params.floor_prob_blue,
+            ued_params.floor_prob_red,
+        ]
+    )
+    floor_colour = jax.random.choice(_rngs[0], jnp.arange(4), p=prob_of_floor_colour)
+    state = state.replace(polygon_shape_roles=state.polygon_shape_roles.at[0].set(floor_colour))
+
+    # When we add shapes we don't want them to collide with already existing shapes
+    def _choose_proposal_with_least_collisions(proposals, bias=None):
+        rr, cr, cc = jax.vmap(engine.calculate_collision_manifolds)(proposals)
+
+        rr_collisions = jnp.sum(jnp.sum(rr.active.astype(jnp.int32), axis=-1), axis=-1)
+        cr_collisions = jnp.sum(cr.active.astype(jnp.int32), axis=-1)
+        cc_collisions = jnp.sum(cc.active.astype(jnp.int32), axis=-1)
+
+        all_collisions = jnp.concatenate(
+            [rr_collisions[:, None], cr_collisions[:, None], cc_collisions[:, None]], axis=1
+        )
+        num_collisions = jnp.sum(all_collisions, axis=-1)
+        if bias is not None:
+            num_collisions = num_collisions + bias
+
+        chosen_addition_idx = jnp.argmin(num_collisions)
+
+        return jax.tree.map(lambda x: x[chosen_addition_idx], proposals)
+
+    def _add_filtered_shape(rng, state, force_no_fixate=False):
+        rng, _rng = jax.random.split(rng)
+        _rngs = jax.random.split(_rng, ued_params.add_shape_n_proposals)
+        proposed_additions = jax.vmap(mutate_add_shape, in_axes=(0, None, None, None, None, None))(
+            _rngs,
+            state,
+            env_params,
+            static_env_params,
+            ued_params,
+            jnp.logical_or(force_no_fixate, small_force_no_fixate),
+        )
+
+        return _choose_proposal_with_least_collisions(proposed_additions)
+
+    def _add_filtered_connected_shape(rng, state, force_rjoint=False):
+        rng, _rng = jax.random.split(rng)
+        _rngs = jax.random.split(_rng, ued_params.add_shape_n_proposals)
+
+        proposed_additions, valid = jax.vmap(mutate_add_connected_shape, in_axes=(0, None, None, None, None, None))(
+            _rngs, state, env_params, static_env_params, ued_params, force_rjoint
+        )
+
+        bias = (jnp.ones(ued_params.add_shape_n_proposals) - 1 * valid) * ued_params.connect_no_visibility_bias
+
+        return _choose_proposal_with_least_collisions(proposed_additions, bias=bias)
+
+    # Add green and blue - make sure they're not both fixated
+    force_green_no_fixate = (jax.random.uniform(_rngs[1]) < 0.5) | (state.polygon_shape_roles[0] == 2)
+    state = _add_filtered_shape(_rngs[2], state, force_green_no_fixate)
+    state = _add_filtered_shape(_rngs[3], state, ~force_green_no_fixate)
+
+    # Forced controls
+    forced_control = jnp.array([[0, 1], [1, 0], [1, 1]])[jax.random.randint(_rngs[4], (), 0, 3)]
+    force_thruster, force_motor = forced_control[0], forced_control[1]
+
+    # Forced motor
+    state = jax.lax.cond(
+        force_motor,
+        lambda: _add_filtered_connected_shape(_rngs[5], state, force_rjoint=True),  # force the rjoint
+        lambda: _add_filtered_shape(_rngs[6], state),
+    )
+
+    # Forced thruster
+    state = jax.lax.cond(
+        force_thruster,
+        lambda: mutate_add_thruster(_rngs[7], state, env_params, static_env_params, ued_params),
+        lambda: state,
+    )
+
+    # Add rest of shapes
+    n_shapes_to_add = (
+        static_env_params.num_polygons + static_env_params.num_circles - 3 - static_env_params.num_static_fixated_polys
+    )
+
+    def _add_shape(state, rng):
+        rng, _rng = jax.random.split(rng)
+        _rngs = jax.random.split(_rng, 3)
+        shape_add_type = jax.random.choice(
+            _rngs[0],
+            jnp.arange(3),
+            p=jnp.array(
+                [ued_params.add_connected_shape_chance, ued_params.add_shape_chance, ued_params.add_no_shape_chance]
+            ),
+        )
+
+        state = jax.lax.switch(
+            shape_add_type,
+            [
+                lambda: _add_filtered_connected_shape(_rngs[1], state),
+                lambda: _add_filtered_shape(_rngs[2], state),
+                lambda: state,
+            ],
+        )
+
+        return state, None
+
+    state, _ = jax.lax.scan(_add_shape, state, jax.random.split(_rngs[8], n_shapes_to_add))
+
+    # Add thrusters
+    n_thrusters_to_add = static_env_params.num_thrusters - 1
+
+    def _add_thruster(state, rng):
+        rng, _rng = jax.random.split(rng)
+        _rngs = jax.random.split(_rng, 3)
+        state = jax.lax.cond(
+            jax.random.uniform(_rngs[0]) < ued_params.add_thruster_chance,
+            lambda: mutate_add_thruster(_rngs[1], state, env_params, static_env_params, ued_params),
+            lambda: state,
+        )
+
+        return state, None
+
+    state, _ = jax.lax.scan(_add_thruster, state, jax.random.split(_rngs[9], n_thrusters_to_add))
+
+    # Randomly swap green and blue to remove left-right bias
+    def _swap_roles(do_swap_roles, roles):
+        role1 = roles == 1
+        role2 = roles == 2
+
+        swapped_roles = roles * ~(role1 | role2) + role1.astype(int) * 2 + role2.astype(int) * 1
+        return jax.lax.select(do_swap_roles, swapped_roles, roles)
+
+    do_swap_roles = jax.random.uniform(_rngs[10], shape=()) < 0.5
+    # Don't want to swap if floor is non-standard
+    do_swap_roles &= state.polygon_shape_roles[0] == 0
+    state = state.replace(
+        polygon_shape_roles=_swap_roles(do_swap_roles, state.polygon_shape_roles),
+        circle_shape_roles=_swap_roles(do_swap_roles, state.circle_shape_roles),
+    )
+
+    return permute_state(_rngs[11], state, static_env_params)
+
+
+@partial(jax.jit, static_argnums=(2, 4, 5))
+def create_random_starting_distribution(
+    rng,
+    env_params: EnvParams,
+    static_env_params: StaticEnvParams,
+    ued_params: UEDParams,
+    env_size_name: str,
+    controllable=True,
+):
+    rng, _rng = jax.random.split(rng)
+    _rngs = jax.random.split(_rng, 15)
+    d = to_state_dict(ued_params)
+    ued_params = UEDParams(
+        **(
+            d
+            | dict(
+                goal_body_size_factor=2.0,
+                thruster_power_multiplier=2.0,
+                max_shape_size=0.5,
+            )
+        ),
+    )
+
+    prob_of_large_shapes = 0.05
+
+    ued_params_large_shapes = ued_params.replace(
+        max_shape_size=static_env_params.max_shape_size * 1.0, goal_body_size_factor=1.0
+    )
+
+    state = create_empty_env(env_params, static_env_params)
+
+    def _get_ued_params(rng):
+        rng, _rng, _rng2 = jax.random.split(rng, 3)
+        large_shapes = jax.random.uniform(_rng) < prob_of_large_shapes
+        params_to_use = jax.tree.map(
+            lambda x, y: jax.lax.select(large_shapes, x, y), ued_params_large_shapes, ued_params
+        )
+        return params_to_use
+
+    def _my_add_shape(rng, state):
+        rng, _rng, _rng2 = jax.random.split(rng, 3)
+        return mutate_add_shape(_rng, state, env_params, static_env_params, _get_ued_params(_rng2))
+
+    def _my_add_connected_shape(rng, state, **kwargs):
+        rng, _rng, _rng2 = jax.random.split(rng, 3)
+        return mutate_add_connected_shape_proper(
+            _rng, state, env_params, static_env_params, _get_ued_params(_rng2), **kwargs
+        )
+
+    # Add the green thing and blue thing
+    state = _my_add_shape(_rngs[0], state)
+    state = _my_add_shape(_rngs[1], state)
+    if controllable:
+        # Forced controls
+        forced_control = jnp.array([[0, 1], [1, 0], [1, 1]])[jax.random.randint(_rngs[2], (), 0, 3)]
+        force_thruster, force_motor = forced_control[0], forced_control[1]
+
+        # Forced motor
+        state = jax.lax.cond(
+            force_motor,
+            lambda: _my_add_connected_shape(_rngs[3], state, force_rjoint=True),  # force the rjoint
+            lambda: state,
+        )
+
+        # Forced thruster
+        state = jax.lax.cond(
+            force_thruster,
+            lambda: mutate_add_thruster(_rngs[4], state, env_params, static_env_params, ued_params),
+            lambda: state,
+        )
+    return permute_state(_rngs[7], state, static_env_params)
+
+*************** kinetix/environment/ued/ued_state.py ***************
+import math
+
+from flax import struct
+
+
+@struct.dataclass
+class UEDParams:
+    max_shape_size: float = 1.0
+    goal_body_opposide_side_chance: float = 0.5
+    goal_body_size_factor: float = 1.0
+    min_rjoints_bias: int = 2
+
+    large_rect_dim_chance: float = 0.3
+    large_rect_dim_scale: float = 2.0
+
+    generate_triangles: bool = False
+    thruster_power_multiplier: float = 2.0
+
+    thruster_align_com_prob: float = 0.8
+
+    motor_on_chance: float = 0.8
+    motor_min_speed: float = 0.4
+    motor_max_speed: float = 3.0
+    motor_min_power: float = 1.0
+    motor_max_power: float = 3.0
+    wheel_max_power: float = 1.0
+
+    joint_limit_chance: float = 0.4
+    joint_limit_max: float = math.pi
+    joint_fixed_chance: float = 0.1
+
+    fixate_chance_min: float = 0.02
+    fixate_chance_max: float = 1.0
+    fixate_chance_scale: float = 4.0  # Fixation probability scales with size
+    fixate_shape_bottom_bias: float = 0.0
+    fixate_shape_bottom_bias_special_role: float = 0.6
+
+    circle_max_size_coeff: float = 0.8
+
+    connect_to_fixated_prob_coeff: float = 0.05
+    connect_visibility_min: float = 0.05
+    connect_no_visibility_bias: float = 10.0
+
+    add_shape_chance: float = 0.35
+    add_connected_shape_chance: float = 0.35
+    add_no_shape_chance: float = 0.3
+    add_thruster_chance: float = 0.3
+    add_shape_n_proposals: int = 8
+
+    floor_prob_normal: float = 0.9
+    floor_prob_green: float = 0.0
+    floor_prob_blue: float = 0.02
+    floor_prob_red: float = 0.08
+
+*************** kinetix/environment/ued/util.py ***************
+import math
+from functools import partial
+
+import jax
+import jax.numpy as jnp
+
+from jax2d.engine import PhysicsEngine, calculate_collision_matrix, recalculate_mass_and_inertia, select_shape
+from jax2d.sim_state import RigidBody, Thruster
+from kinetix.environment.env_state import EnvParams, EnvState, StaticEnvParams
+
+
+def sample_dimensions(rng, static_env_params: StaticEnvParams, is_rect: bool, ued_params, max_shape_size=None):
+    if max_shape_size is None:
+        max_shape_size = static_env_params.max_shape_size
+    # Returns (half_dimensions, radius)
+
+    rng, _rng = jax.random.split(rng)
+    # Don't want overly small shapes
+    min_rect_size = 0.05
+    min_circle_size = 0.1
+    cap_rect = max_shape_size / 2.0 / jnp.sqrt(2.0)
+    cap_circ = max_shape_size / 2.0 * ued_params.circle_max_size_coeff
+    half_dimensions = (
+        jax.lax.select(is_rect, jax.random.uniform(_rng, shape=(2,)), jnp.zeros(2, dtype=jnp.float32))
+        * (cap_rect - min_rect_size)
+        + min_rect_size
+    )
+
+    rng, _rng, __rng = jax.random.split(rng, 3)
+    dim_scale = (
+        jnp.ones(2)
+        .at[jax.random.randint(_rng, shape=(), minval=0, maxval=2)]
+        .set(
+            jax.lax.select(
+                jax.random.uniform(__rng) < ued_params.large_rect_dim_chance, ued_params.large_rect_dim_scale, 1.0
+            )
+        )
+    )
+    half_dimensions *= dim_scale
+
+    vertices = jnp.array(
+        [
+            half_dimensions * jnp.array([1, 1]),
+            half_dimensions * jnp.array([1, -1]),
+            half_dimensions * jnp.array([-1, -1]),
+            half_dimensions * jnp.array([-1, 1]),
+        ]
+    )
+
+    rng, _rng = jax.random.split(rng)
+    radius = (
+        jax.lax.select(is_rect, jnp.zeros((), dtype=jnp.float32), jax.random.uniform(_rng, shape=()))
+        * (cap_circ - min_circle_size)
+        + min_circle_size
+    )
+    return vertices, half_dimensions, radius
+
+
+def count_roles(state: EnvState, static_env_params: StaticEnvParams, role: int, include_static_polys=True) -> int:
+    active_to_use = state.polygon.active
+    if not include_static_polys:
+        active_to_use = active_to_use.at[: static_env_params.num_static_fixated_polys].set(False)
+    return ((state.polygon_shape_roles == role) * active_to_use).sum() + (
+        (state.circle_shape_roles == role) * state.circle.active
+    ).sum()
+
+
+def random_position_on_triangle(rng, vertices):
+    verts = vertices[:3]
+    rng, _rng, _rng2 = jax.random.split(rng, 3)
+    f1 = jax.random.uniform(_rng)
+    f2 = jax.random.uniform(_rng2)
+    # https://www.reddit.com/r/godot/comments/mqp29g/how_do_i_get_a_random_position_inside_a_collision/
+    return verts[0] + jnp.sqrt(f1) * (-verts[0] + verts[1] + f2 * (verts[2] - verts[1]))
+
+
+def random_position_on_rectangle(rng, vertices):
+    verts = vertices[:4]
+    rng, _rng, _rng2 = jax.random.split(rng, 3)
+    f1 = jax.random.uniform(_rng)
+    f2 = jax.random.uniform(_rng2)
+
+    min_x, max_x = jnp.min(verts[:, 0]), jnp.max(verts[:, 0])
+    min_y, max_y = jnp.min(verts[:, 1]), jnp.max(verts[:, 1])
+    random_x_pos = min_x + f1 * (max_x - min_x)
+    random_y_pos = min_y + f2 * (max_y - min_y)
+
+    return jnp.array([random_x_pos, random_y_pos])
+
+
+def random_position_on_polygon(rng, vertices, n_vertices, static_env_params: StaticEnvParams):
+    assert static_env_params.max_polygon_vertices <= 4, "Only supports up to 4 vertices"
+    return jax.lax.select(
+        n_vertices <= 3, random_position_on_triangle(rng, vertices), random_position_on_rectangle(rng, vertices)
+    )
+
+
+def random_position_on_circle(rng, radius, on_centre_chance):
+    rngs = jax.random.split(rng, 3)
+
+    on_centre = jax.random.uniform(rngs[0]) < on_centre_chance
+
+    local_joint_position_circle_theta = jax.random.uniform(rngs[1], shape=()) * 2 * math.pi
+    local_joint_position_circle_r = jax.random.uniform(rngs[2], shape=()) * radius
+    local_joint_position_circle = jnp.array(
+        [
+            local_joint_position_circle_r * jnp.cos(local_joint_position_circle_theta),
+            local_joint_position_circle_r * jnp.sin(local_joint_position_circle_theta),
+        ]
+    )
+
+    return jax.lax.select(on_centre, jnp.array([0.0, 0.0]), local_joint_position_circle)
+
+
+def get_role(rng, state: EnvState, static_env_params: StaticEnvParams, initial_p=None) -> int:
+
+    if initial_p is None:
+        initial_p = jnp.array([1.0, 1.0, 1.0, 1.0])
+
+    needs_ball = count_roles(state, static_env_params, 1) == 0
+    needs_goal = count_roles(state, static_env_params, 2) == 0
+    needs_lava = count_roles(state, static_env_params, 3) == 0
+
+    # always put goal/ball first.
+    prob_of_something_else = (needs_ball == 0) & (needs_goal == 0)
+    p = initial_p * jnp.array(
+        [prob_of_something_else, needs_ball, needs_goal, prob_of_something_else * needs_lava / 3]
+    )  # This ensures we cannot more than one ball or goal.
+    return jax.random.choice(rng, jnp.array([0, 1, 2, 3]), p=p)
+
+
+def is_space_for_shape(state: EnvState):
+    return jnp.logical_not(jnp.concatenate([state.polygon.active, state.circle.active])).sum() > 0
+
+
+def is_space_for_joint(state: EnvState):
+    return jnp.logical_not(state.joint.active).sum() > 0
+
+
+def are_there_shapes_present(state: EnvState, static_env_params: StaticEnvParams):
+    m = (
+        jnp.concatenate([state.polygon.active, state.circle.active])
+        .at[: static_env_params.num_static_fixated_polys]
+        .set(False)
+    )
+    return m.sum() > 0
+
+
+@partial(jax.jit, static_argnums=(2, 9))
+def add_rigidbody_to_state(
+    state: EnvState,
+    env_params: EnvParams,
+    static_env_params: StaticEnvParams,
+    position: jnp.ndarray,
+    vertices: jnp.ndarray,
+    n_vertices: int,
+    radius: float,
+    shape_role: int,
+    density: float = 1,
+    is_circle: bool = False,
+):
+
+    new_rigid_body = RigidBody(
+        position=position,
+        velocity=jnp.array([0.0, 0.0]),
+        inverse_mass=1.0,
+        inverse_inertia=1.0,
+        rotation=0.0,
+        angular_velocity=0.0,
+        radius=radius,
+        active=True,
+        friction=1.0,
+        vertices=vertices,
+        n_vertices=n_vertices,
+        collision_mode=1,
+        restitution=0.0,
+    )
+
+    if is_circle:
+        actives = state.circle.active
+    else:
+        actives = state.polygon.active
+
+    idx = jnp.argmin(actives)
+
+    def noop(state):
+        return state
+
+    def replace(state):
+        add_func = lambda all, new: all.at[idx].set(new)
+        if is_circle:
+            state = state.replace(
+                circle=jax.tree.map(add_func, state.circle, new_rigid_body),
+                circle_densities=state.circle_densities.at[idx].set(density),
+                circle_shape_roles=state.circle_shape_roles.at[idx].set(shape_role),
+            )
+        else:
+            state = state.replace(
+                polygon=jax.tree.map(add_func, state.polygon, new_rigid_body),
+                polygon_densities=state.polygon_densities.at[idx].set(density),
+                polygon_shape_roles=state.polygon_shape_roles.at[idx].set(shape_role),
+            )
+
+        state = state.replace(
+            collision_matrix=calculate_collision_matrix(static_env_params, state.joint),
+        )
+
+        state = recalculate_mass_and_inertia(state, static_env_params, state.polygon_densities, state.circle_densities)
+        return state
+
+    return jax.lax.cond(jnp.logical_not(actives).sum() > 0, replace, noop, state)
+
+
+def rectangle_vertices(half_dim):
+    return jnp.array(
+        [
+            half_dim * jnp.array([1, 1]),
+            half_dim * jnp.array([1, -1]),
+            half_dim * jnp.array([-1, -1]),
+            half_dim * jnp.array([-1, 1]),
+        ]
+    )
+
+
+# More Manual Control
+@partial(jax.jit, static_argnums=(2,))
+def add_rectangle_to_state(
+    state: EnvState,
+    env_params: EnvParams,
+    static_env_params: StaticEnvParams,
+    position: jnp.ndarray,
+    width: float,
+    height: float,
+    shape_role: int,
+    density: float = 1,
+):
+
+    return add_rigidbody_to_state(
+        state,
+        env_params,
+        static_env_params,
+        position,
+        rectangle_vertices(jnp.array([width, height]) / 2),
+        4,
+        0.0,
+        shape_role,
+        density,
+        is_circle=False,
+    )
+
+
+@partial(jax.jit, static_argnums=(2,))
+def add_circle_to_state(
+    state: EnvState,
+    env_params: EnvParams,
+    static_env_params: StaticEnvParams,
+    position: jnp.ndarray,
+    radius: float,
+    shape_role: int,
+    density: float = 1,
+):
+    return add_rigidbody_to_state(
+        state,
+        env_params,
+        static_env_params,
+        position,
+        jnp.array([0.0, 0.0]),
+        0,
+        radius,
+        shape_role,
+        density,
+        is_circle=True,
+    )
+
+
+@partial(jax.jit, static_argnums=(2,))
+def add_thruster_to_object(
+    state: EnvState,
+    env_params: EnvParams,
+    static_env_params: StaticEnvParams,
+    shape_index: int,
+    rotation: float,
+    colour: int,
+    thruster_power_multiplier: float,
+):
+    def dummy(state):
+        return state
+
+    def do_add(state: EnvState):
+        thruster_idx = jnp.argmin(state.thruster.active)
+
+        shape = select_shape(state, shape_index, static_env_params)
+
+        thruster = Thruster(
+            object_index=shape_index,
+            active=True,
+            relative_position=jnp.array([0.0, 0.0]),  # a bit of a hack but reasonable.
+            rotation=rotation,
+            power=1.0 / jax.lax.select(shape.inverse_mass == 0, 1.0, shape.inverse_mass) * thruster_power_multiplier,
+            global_position=select_shape(state, shape_index, static_env_params).position,
+        )
+
+        state = state.replace(
+            thruster=jax.tree_map(lambda y, x: y.at[thruster_idx].set(x), state.thruster, thruster),
+            thruster_bindings=state.thruster_bindings.at[thruster_idx].set(colour),
+        )
+
+        return state
+
+    return jax.lax.cond(
+        (select_shape(state, shape_index, static_env_params).active)
+        & (jnp.logical_not(state.thruster.active).sum() > 0),
+        do_add,
+        dummy,
+        state,
+    )
+
+
+def make_velocities_zero(state: EnvState):
+    def inner(state):
+        return state.replace(
+            polygon=state.polygon.replace(
+                angular_velocity=state.polygon.angular_velocity * 0,
+                velocity=state.polygon.velocity * 0,
+            ),
+            circle=state.circle.replace(
+                angular_velocity=state.circle.angular_velocity * 0,
+                velocity=state.circle.velocity * 0,
+            ),
+        )
+
+    return inner(state)
+
+
+def make_do_dummy_step(
+    params: EnvParams, static_sim_params: StaticEnvParams, zero_collisions=True, zero_velocities=True
+):
+    env = PhysicsEngine(static_sim_params)
+
+    @jax.jit
+    def _step_fn(state):
+        state, _ = env.step(state, params, jnp.zeros((static_sim_params.num_joints + static_sim_params.num_thrusters,)))
+        return state
+
+    def do_dummy_step(state: EnvState) -> EnvState:
+        rng = jax.random.PRNGKey(0)
+        og_col = state.collision_matrix
+        g = state.gravity
+        state = state.replace(
+            collision_matrix=state.collision_matrix & (not zero_collisions), gravity=state.gravity * 0
+        )
+        state = _step_fn(state)
+        state = state.replace(gravity=g, collision_matrix=og_col)
+        if zero_velocities:
+            state = make_velocities_zero(state)
+        return state
+
+    return do_dummy_step
+
+
+ *Entry point of the environment is kinetix.environment.env.BasePhysicsEnv:KinetixEntityMultiDiscreteActions
+ *Variable representing an environment is env_state:EnvState
+ *We use the jax2d physics engine to simulate the dynamics of the environment.
