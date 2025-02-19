@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="300" height="300" viewBox="0 0 300 300">
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="150" height="150" viewBox="0 0 150 150">
   <defs>
     <!-- Dynamic gradient that changes colors over time -->
     <linearGradient id="dynamicGradient" x1="0%" y1="0%" x2="100%" y2="100%">
@@ -15,48 +16,47 @@
       </stop>
     </linearGradient>
     <!-- Animated arrow marker -->
-    <marker id="dynamicArrow" markerWidth="10" markerHeight="10" refX="0" refY="3" orient="auto">
-      <path d="M0,0 L0,6 L9,3 Z" fill="white">
+    <marker id="dynamicArrow" markerWidth="6" markerHeight="6" refX="0" refY="2" orient="auto">
+      <path d="M0,0 L0,4 L6,2 Z" fill="white">
         <animate attributeName="fill" values="#FFFFFF; #FFD700; #FFFFFF" dur="3s" repeatCount="indefinite" />
       </path>
     </marker>
     <!-- Inline CSS for interactivity -->
-    <style type="text/css">
-      <![CDATA[
-        /* Rotate and scale the entire logo on hover */
-        .dynamic:hover {
-          animation: rotateScale 3s ease-in-out infinite;
-        }
-        @keyframes rotateScale {
-          0% { transform: rotate(0deg) scale(1); }
-          50% { transform: rotate(180deg) scale(1.1); }
-          100% { transform: rotate(360deg) scale(1); }
-        }
-        /* Change text color on hover */
-        .textHover:hover {
-          fill: #FFD700;
-          cursor: pointer;
-        }
-      ]]>
-    </style>
+    <style type="text/css"><![CDATA[
+      /* Rotate and scale the entire logo on hover */
+      .dynamic:hover {
+        animation: rotateScale 3s ease-in-out infinite;
+      }
+      @keyframes rotateScale {
+        0% { transform: rotate(0deg) scale(1); }
+        50% { transform: rotate(180deg) scale(1.1); }
+        100% { transform: rotate(360deg) scale(1); }
+      }
+      /* Change text color on hover */
+      .textHover:hover {
+        fill: #FFD700;
+        cursor: pointer;
+      }
+    ]]></style>
   </defs>
-
-  <!-- Wrap everything in a group for interactive animations, with the transform-origin set to the center -->
-  <g class="dynamic" style="transform-origin: 150px 150px;">
-    <!-- Animated pulsating circular background with the dynamic gradient -->
-    <circle cx="150" cy="150" r="120" fill="url(#dynamicGradient)">
-      <animate attributeName="r" from="115" to="125" dur="2s" repeatCount="indefinite" />
-    </circle>
-
-    <!-- The "Editax" text; changes color on hover -->
-    <text x="150" y="165" font-family="Verdana" font-size="40" fill="white"
+  
+  <!-- Wrap everything in a group for interactive animations with the transform-origin adjusted -->
+  <g class="dynamic" style="transform-origin: 75px 75px;">
+    <!-- Animated pulsating elliptical background with the dynamic gradient -->
+    <ellipse cx="75" cy="75" rx="60" ry="40" fill="url(#dynamicGradient)">
+      <animate attributeName="rx" values="55;65;55" dur="2s" repeatCount="indefinite" />
+      <animate attributeName="ry" values="35;45;35" dur="2s" repeatCount="indefinite" />
+    </ellipse>
+    
+    <!-- The "Editax" text with a more interesting font; centered -->
+    <text x="75" y="85" font-family="Brush Script MT, cursive" font-size="20" fill="white"
           text-anchor="middle" dominant-baseline="middle" class="textHover">
       Editax
     </text>
-
+    
     <!-- Diagonal arrow with animated stroke width -->
-    <line x1="80" y1="220" x2="220" y2="80" stroke="white" stroke-width="4" marker-end="url(#dynamicArrow)">
-      <animate attributeName="stroke-width" from="4" to="6" dur="1.5s" repeatCount="indefinite" />
+    <line x1="40" y1="110" x2="110" y2="40" stroke="white" stroke-width="2" marker-end="url(#dynamicArrow)">
+      <animate attributeName="stroke-width" from="2" to="3" dur="1.5s" repeatCount="indefinite" />
     </line>
   </g>
 </svg> 
