@@ -16,7 +16,7 @@
 
 ## Overview
 
-Editax is a framework for creating automated ACCEL (Adversarially Compounding Complexity by Editing Levels) editors for Unsupervised Environment Design. It automatically generates small probabilistic programs to modify POMDPs, removing the domain knowledge required to hand-design editors.
+Editax is a framework for creating automated ACCEL (Evolving Curricula with Regret-Based Environment Design) editors for Unsupervised Environment Design. It automatically generates small probabilistic programs to modify POMDPs, removing the domain knowledge required to hand-design editors.
 
 ### Key Features
 
