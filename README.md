@@ -1,5 +1,5 @@
 <div align="center">
-![Editax Logo](editax-logo.svg)
+  <img src="editax-logo.svg" alt="Editax Logo" width="200">
 </div>
 
 
