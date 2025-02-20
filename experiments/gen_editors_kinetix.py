@@ -37,7 +37,6 @@ if __name__ == "__main__":
         reset_type="replay", 
         static_env_params=static_env_params,
     )
-
     # Sample a level
     rng = jax.random.PRNGKey(0)
     rng, rng_editor = jax.random.split(rng)
