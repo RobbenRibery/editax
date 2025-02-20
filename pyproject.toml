@@ -2,7 +2,10 @@
 name = "editax"
 version = "0.1.0"
 description = "Automatically created RL Environment Editors"
-authors = ["RobbenRibery <runodng.liu@outlook.com>"]
+authors = [
+    "Rundong Liu <rundong.liu@proton.me>",
+    "Shyam Sudhakaran <shyamsnair@protonmail.com>"
+]
 license = "Apache 2.0"
 readme = "README.md"
 packages = [
