@@ -6,10 +6,7 @@ import chex
 from flax import struct
 
 import os
-import re
 from typing import List, Dict
-from textwrap import dedent
-import ast 
 import inspect 
 
 from editax.template import EditorMaker, EditorCorrector
@@ -17,8 +14,11 @@ from editax.state import EnvState
 from editax.utils import (
     LoggingHandler,
     EditorScriptParser, 
-    code_utils_get_module_from_path,
     code_utils_clear_cache,
+    code_utils_split_code,
+    code_utils_inject_corrections,
+    code_utils_test_editors,
+    prompt_utils_form_designs,
 )
 
 from langchain_openai.chat_models.base import BaseChatOpenAI
@@ -32,50 +32,16 @@ from tqdm import tqdm
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-
-# def get_functions_from_file(file_path) -> List[Dict[str, str]]:
-    
-#     with open(file_path, 'r') as file:
-#         tree = ast.parse(file.read())
-
-#     def visit_function(node, nesting_level=0, parent=None):
-#         # Get function source lines
-#         start_line = node.lineno - 1
-#         if node.decorator_list:
-#             start_line = min(dec.lineno for dec in node.decorator_list) - 1
-        
-#         function_info = {
-#             'text': '\n'.join(content.splitlines()[start_line:node.end_lineno]),
-#             'nesting_level': nesting_level,
-#             'parent': parent,
-#             'lineno': node.lineno,
-#             'args': [arg.arg for arg in node.args.args]
-#         }
-        
-#         functions[node.name] = function_info
-        
-#         # Recursively visit nested functions
-#         for child in ast.iter_child_nodes(node):
-#             if isinstance(child, ast.FunctionDef):
-#                 visit_function(child, nesting_level + 1, node.name)
-    
-#     functions = []
-#     for node in ast.walk(tree):
-#         if isinstance(node, ast.FunctionDef):
-#             functions.append({
-#                 'name': node.name,
-#                 'lineno': node.lineno,
-#                 'args': [arg.arg for arg in node.args.args],
-#                 "code": astor.to_source(node),
-#             })
-#     return functions
-
+# Add console handler
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+console_handler.setFormatter(formatter)
+logger.addHandler(console_handler)
 
 class EditorBuffer(struct.PyTreeNode): 
-    """Edditor Buffer's attributes
-
-    Args:
-        struct (_type_): _description_
+    """
+    A buffer that stores the successful editor combinations and their unique indices.
     """
     successful_combos: chex.Array #(buffer_size, n_edits)
     unique_editor_indicies: chex.Array
@@ -115,6 +81,30 @@ class EditorManager:
         init_editors: bool = True,
         verbose: bool = True,
     ):
+        """
+        Initialize the EditorManager.
+
+        Args:
+            env_name: The name of the environment.
+            env_entry_point: The entry point of the environment.
+            env_source_files: The source files of the environment.
+            env_var: The environment variable to be considered.
+            env_var_type: The type of the environment variable.
+            out_dir: The output directory.
+            out_filename: The output filename.
+            llm_name: The name of the large language model.
+            max_tokens: The maximum number of tokens to generate.
+            temperature: The temperature of the language model.
+            max_correction_retry: The maximum number of corrections to retry.
+            maker_template: The template for generating editors.
+            corrector_template: The template for correcting editors.
+            parser: The parser for extracting information from the source code.
+            engine_statement: The statement regarding the engine configuration.
+            editor_buffer_size: The size of the editor buffer.
+            n_edits: The number of edits to generate.
+            init_editors: Whether to initialize the editors.
+            verbose: Whether to print verbose information.
+        """
         # env info
         self.env_name = env_name
         self.env_entry_point = env_entry_point
@@ -144,7 +134,6 @@ class EditorManager:
                 temperature=temperature,
                 max_tokens=max_tokens,    
             )
-
         elif "gpt" in llm_name or 'o1' in llm_name or 'o3' in llm_name:
             assert "OPENAI_API_KEY" in os.environ
             if 'gpt' in self.model_name:
@@ -157,7 +146,7 @@ class EditorManager:
                 self.model = ChatOpenAI(
                     model=self.model_name,
                     temperature=1,
-                )
+                )        
         elif "deepseek" in llm_name:
             assert "DEEPSEEK_API_KEY" in os.environ
             deepseek_api_key = os.environ["DEEPSEEK_API_KEY"]
@@ -171,10 +160,8 @@ class EditorManager:
         else:
             raise ValueError(f"Invalid model name: {self.model_name}")
         
-        self.model.callbacks = [LoggingHandler()]
-        
         # parser
-        self.parser = parser
+        self.parser = parser()
 
         # mutators info
         self.init_editors = init_editors
@@ -184,6 +171,20 @@ class EditorManager:
         self.verbose = verbose
 
     def load_env_input_string(self,) -> str: 
+        """
+        Returns a string containing all the source code of the environment source files,
+        the entry point of the environment, the variable representing the environment,
+        and the engine statement (if any).
+
+        The string is formatted as follows:
+        * The file name of each source file is surrounded by delimiters.
+        * The content of each source file is included after its name.
+        * The entry point of the environment is specified after all the source files.
+        * The variable representing the environment is specified after the entry point.
+        * The engine statement is specified after the variable representing the environment (if any).
+
+        This string is used as the input to the large language model when generating editors.
+        """
         delimitier = "***************"
         input_string = ""
 
@@ -202,28 +203,36 @@ class EditorManager:
     def reset(
         self, 
         rng:chex.PRNGKey,
-        use_existing:bool = True, 
-        dumm_env_state:EnvState | None = None,
+        correction_only:bool = True, 
+        dummy_env_state:EnvState | None = None,
+        num_inner_loops:int = 8,
     )-> Dict[str, Callable]:
-        
-        gen_func = self.llm_get_editors_sc
-    
-        init_editor_map = self.execute_and_correct(
-            corrective_func= self.llm_fix_mutator,
-            dummy_env_state= dumm_env_state,
-            generation_func= gen_func,
-            generative_args= (self.input_string, self.engine_statement, self.env_var, self.env_var_type),
-            correction_only= use_existing,
+        """
+        Resets the editor manager, generating new editors and an editor buffer.
+
+        Args:
+            rng: The random key for generating the editors and the editor buffer.
+            correction_only: Whether to only correct the existing editors or generate new
+                ones. Defaults to True.
+            dummy_env_state: The dummy environment state used for testing the editors.
+                Defaults to None.
+            num_inner_loops: The number of design iterations to perform when generating
+                editors. Defaults to 8.
+
+        Returns:
+            A dictionary mapping editor names to the corresponding editor functions and
+            an EditorBuffer object containing the editor buffer.
+        """
+        init_editor_map = self.generate_and_correct(
+            corrective_func= self.llm_correct_editors,
+            dummy_env_state= dummy_env_state,
+            generative_args= (num_inner_loops, ),
+            correction_only= correction_only,
         )
-        
         self.org_editors_map = init_editor_map
-        wrapped_editor_map = {
-            k: wrapping_mutator(v, self.env_name) \
-            for k,v in init_editor_map.items()
-        }
 
         # init editors        
-        self.editors:List[Callable] = [wrapped_editor_map[k] for k in init_editor_map]
+        self.editors:List[Callable] = [init_editor_map[k] for k in init_editor_map]
         self.n_eidtors = len(self.editors)
         self.default_num_mutation = 1 
 
@@ -239,16 +248,15 @@ class EditorManager:
             buffer_size = self.editor_buffer_size,
             n_edits = self.n_edits,
             default_num_mutation = self.default_num_mutation,
-            default_random_prob= self.default_random_prob,
         )
     
-    def llm_sample_editors_design(
-        self, 
-        input_string:str, 
-        engine_statement:str, 
-        env_var:str, 
-        env_var_type:str
-    ) -> str:
+    def llm_sample_editors_design(self,) -> str:
+        """
+        Sample a design for editor generation using the large language model.
+
+        Returns:
+            str: The generated design plan.
+        """
         self.model.stop = ["[PLAN ENDS HERE]"]
         out = self.model.invoke(
             [
@@ -257,78 +265,68 @@ class EditorManager:
                     self.maker_template.get_system_template() + "\n\n" +
                     self.maker_template.get_human_template().format(
                         **{
-                            "input_string": input_string,
-                            "engine_statement": engine_statement,
-                            "env_var":env_var,
-                            "env_var_type":env_var_type,
+                            "input_string": self.input_string,
+                            "engine_statement": self.engine_statement,
+                            "env_var":self.env_var,
+                            "env_var_type":self.env_var_type,
                         }
                     )
                 ),
-            ]
+            ],
+            config={"callbacks": [LoggingHandler()]}
         ).content
         self.model.stop = None
         return out
     
-    def llm_sample_editors(
-        self,
-        input_string:str, 
-        engine_statement:str, 
-        env_var:str, 
-        env_var_type:str,
-        num_inner_loops:int = 8,
-    ) -> Tuple[str, str]: 
+    def llm_sample_editors(self, num_inner_loops:int = 5,) -> Tuple[str, str]: 
         """
-        Generates editors using a self-consistency approach based on input parameters.
+        Samples and generates editors using a self-consistency mechanism.
 
-        This function creates multiple editor designs based on the provided input parameters
-        and selects the most consistent design through a self-consistency mechanism. The final
-        design is then used to generate the editors according to the plan.
+        This function generates multiple editor designs based on the input parameters
+        and attempts to find the most consistent design through iterations. The selected
+        design is then used to generate editors according to a plan. It uses a large 
+        language model to assist in the design and generation of editors.
 
         Args:
-            input_string (str): The input string to be formatted into the human template.
-            engine_statement (str): The statement regarding the engine configuration.
-            env_var (str): The environment variable to be considered.
-            env_var_type (str): The type of the environment variable.
-            num_inner_loops (int, optional): The number of design iterations to perform. Defaults to 5.
+            num_inner_loops (int, optional): The number of design iterations to perform. 
+                Defaults to 5.
 
         Returns:
-            str: The generated editors according to the most consistent design plan.
+            Tuple[str, str]: A tuple containing the generated editors and the parsed 
+            representation of the editors.
         """
+        if not os.path.exists(self.out_dir):
+            os.makedirs(self.out_dir)
         # base messages 
         messages = [
             (
                 "human",
                 self.maker_template.get_human_template().format(
                     **{
-                        "input_string": input_string,
-                        "engine_statement": engine_statement,
-                        "env_var":env_var,
-                        "env_var_type":env_var_type,
+                        "input_string": self.input_string,
+                        "engine_statement": self.engine_statement,
+                        "env_var":self.env_var,
+                        "env_var_type":self.env_var_type,
                     }
                 )
             ),
         ]
-        deisgn_text_path = os.path.join(self.mutators_dir, "designs.txt")
+        deisgn_text_path = os.path.join(self.out_dir, "designs.txt")
         if not os.path.exists(deisgn_text_path):
             # designs
             repr_designs = []
             logger.info(f"Starting creating {num_inner_loops} designs...")
             for _ in tqdm(range(num_inner_loops)):
-                editors_design = self.llm_sample_editors_design(
-                    input_string= input_string,
-                    engine_statement= engine_statement,
-                    env_var= env_var,
-                    env_var_type= env_var_type,
-                )
+                editors_design = self.llm_sample_editors_design()
                 repr_designs.append(editors_design)
 
             # select the most consistent design
-            joined_designs = form_designs(repr_designs)
-            deisgn_text_path = os.path.join(self.mutators_dir, "designs.txt")
+            joined_designs = prompt_utils_form_designs(repr_designs)
+            deisgn_text_path = os.path.join(self.out_dir, "designs.txt")
             with open(deisgn_text_path, "w") as f:
                 f.write(joined_designs)
-                logger.info(f"saved to {deisgn_text_path}")
-            f.close()
+            logger.info(f"saved to {deisgn_text_path}")
+            
         else:
             logger.info(f"Loading existing designs from {deisgn_text_path}...")
             joined_designs = open(deisgn_text_path, 'r').read()
@@ -346,7 +344,7 @@ class EditorManager:
             )
         ]
         self.model.stop = ["[PLAN ENDS HERE]"]
-        sc_plan = self.model.invoke(sc_messages).content
+        sc_plan = self.model.invoke(sc_messages, config={"callbacks": [LoggingHandler()]}).content
         self.model.stop = None
         
         # generate editors according to the plan
@@ -358,10 +356,10 @@ class EditorManager:
                 "human", 
                 self.maker_template.get_full().format(
                     **{
-                        "input_string": input_string,
-                        "engine_statement": engine_statement,
-                        "env_var":env_var,
-                        "env_var_type":env_var_type,
+                        "input_string": self.input_string,
+                        "engine_statement": self.engine_statement,
+                        "env_var":self.env_var,
+                        "env_var_type":self.env_var_type,
                     }   
                 ),
             ),
@@ -374,7 +372,7 @@ class EditorManager:
                 "Complete the function generation according to the plan that you've produced:"
             ),
         ]
-        model_out = self.model.invoke(code_gen_messages).content
+        model_out = self.model.invoke(code_gen_messages, config={"callbacks": [LoggingHandler()]}).content
         return model_out, self.parser.parse(model_out)
         
     def llm_correct_editors(
@@ -384,7 +382,29 @@ class EditorManager:
         regen:bool=False,
         source_code_augmentation:bool=False
         ) -> Tuple[str, str]:
+        """
+        Correct/Regenerate an editor script based on test errors.
 
+        This function takes in the generated editor script, the error logs, and a boolean flag regen to
+        decide whether to generate a new editor from scratch or to correct the existing one. It also takes
+        in a boolean flag source_code_augmentation to decide whether to use the source code augmentation
+        or not.
+
+        If regen is True, then the function generates a new editor from scratch. If source_code_augmentation
+        is True, then the function uses the source code augmentation template. Otherwise, it uses the regular
+        template. If regen is False, then the function takes the existing editor script and correct it based
+        on the error logs. If source_code_augmentation is True, then the function uses the source code
+        augmentation correction template. Otherwise, it uses the regular correction template.
+
+        Args:
+            editors_script (str): The generated editor script.
+            error_logs (str): The error logs during the execution of the editor.
+            regen (bool, optional): Whether to generate a new editor from scratch. Defaults to False.
+            source_code_augmentation (bool, optional): Whether to use the source code augmentation. Defaults to False.
+
+        Returns:
+            Tuple[str, str]: The generated editor script and its parsed object.
+        """
         if regen: 
             if source_code_augmentation:
                 out = self.model.invoke(
@@ -434,7 +454,7 @@ class EditorManager:
 
         return out, self.parser.parse(out.content)
    
-    def execute_and_correct(
+    def generate_and_correct(
         self, 
         corrective_func:Callable,
         dummy_env_state:EnvState,
@@ -442,21 +462,40 @@ class EditorManager:
         generative_args:Tuple | None = None,
         correction_only:bool = False,
     ) -> Dict[str, Callable] | None:
-        
+        """
+        Generate and correct editors using the given LLM.
+
+        Args:
+            corrective_func: A callable that takes in a string of code and a string of error message
+                and returns the corrected code.
+            dummy_env_state: An instance of EnvState. This is used to test the generated editors.
+            generation_func: A callable that takes in the same arguments as `llm_sample_editors` and returns
+                the generated editors.
+            generative_args: A tuple of arguments to pass to `generation_func`.
+            correction_only: If True, `generation_func` is not called and the method will only correct the
+                existing editors at `self.out_path`.
+
+        Returns:
+            A dictionary mapping function names to their corresponding Callables if successful, None otherwise.
+        """
         i = 0 
-        file_name_without_ext = self.mutators_filename.rsplit('.py',1)[0]
+        file_name_without_ext = self.out_filename.rsplit('.py',1)[0]
         logger.info(f"File name: {file_name_without_ext}")
         caches:List[str] = []
 
         if not correction_only:
             logger.info(f"Generating Editors ...")
-            editors:str = generation_func(*generative_args)
+            if not generation_func:
+                generation_func = self.llm_sample_editors
+            llm_out, editors = generation_func(*generative_args)
+            with open(os.path.join(self.out_dir, "moed_out.txt"), "w") as f:
+                f.write(llm_out)
         else:
-            editors:str = open(self.mutators_path, 'r').read()
+            editors:str = open(self.out_path, 'r').read()
 
         # save tmp editors 
         tmp_file_name = file_name_without_ext + f"_tmp_{i}.py"
-        tmp_path = os.path.join(self.mutators_dir, tmp_file_name)
+        tmp_path = os.path.join(self.out_dir, tmp_file_name)
         with open(tmp_path, "w") as f:
             f.write(editors)
         f.close()
@@ -464,19 +503,19 @@ class EditorManager:
         logger.info(f"Init editors -> {tmp_path}")
 
         # init test 
-        errors_dict, _, func_map = get_testing_func(self.env_name)(dummy_env_state, tmp_path)
+        errors_dict, _, func_map = code_utils_test_editors(dummy_env_state, tmp_path)
         updated_path = tmp_path
 
         if not errors_dict: 
             logger.info("Succeeded!")
-            clear_cache(caches)
+            code_utils_clear_cache(caches)
 
-            if os.path.isfile(self.mutators_path):
+            if os.path.isfile(self.out_path):
                 return func_map
 
             # write to the destination 
-            logger.info(f"Writing editors -> {self.mutators_path}")
-            with open(self.mutators_path, "w") as f:
+            logger.info(f"Writing editors -> {self.out_path}")
+            with open(self.out_path, "w") as f:
                 f.write(editors)
             f.close()
             return func_map
@@ -491,13 +530,13 @@ class EditorManager:
                     
             # perform correction
             logger.info(f"LLM Attempting to fix: {func_name} ...")
-            code_prior, _ = split_code(editors)
+            code_prior, _ = code_utils_split_code(editors)
             editors_lit = code_prior + '\n' + inspect.getsource(func_map[func_name])
             corrections = corrective_func(editors_lit, error)
             
             # save the corrected script
             correction_file = file_name_without_ext + f"_tmp{i}_correction.py"
-            correction_path = os.path.join(self.mutators_dir, correction_file)
+            correction_path = os.path.join(self.out_dir, correction_file)
             with open(correction_path, "w") as f:
                 f.write(corrections)
             f.close()
@@ -505,10 +544,10 @@ class EditorManager:
             caches.append(correction_path)
 
             # load the corrected script as a module 
-            updated_editors = inject_corrections(updated_path, correction_path)
+            updated_editors = code_utils_inject_corrections(updated_path, correction_path)
 
             updated_file = file_name_without_ext + f"_tmp{i}_correction_merged.py"
-            updated_path = os.path.join(self.mutators_dir, updated_file)
+            updated_path = os.path.join(self.out_dir, updated_file)
             with open(updated_path, "w") as f:
                 f.write(updated_editors)
             f.close()
@@ -516,39 +555,22 @@ class EditorManager:
             caches.append(updated_path)
 
             # re-test
-            errors_dict, _, func_map = get_testing_func(self.env_name)(dummy_env_state, updated_path)
+            errors_dict, _, func_map = code_utils_test_editors(dummy_env_state, updated_path)
             
             if not errors_dict: 
                 editors = updated_editors
                 logger.info("Succeeded!")
                 
                 # save successful
-                with open(self.mutators_path, "w") as f:
+                with open(self.out_path, "w") as f:
                     f.write(editors)
                 f.close()
-                clear_cache(caches)
+                code_utils_clear_cache(caches)
                 return func_map
                     
             # bump up the counter
             i += 1 
 
-        clear_cache(caches)
-        raise ValueError(f"Generation Failed after {self.max_correction_retry} attempts")
-
-
-# class PoPEditorManager(EditorManager):
-#     """Vectorised the Editor Manager 
-#     across multiple students 
-#     Args:
-#         EditorManager (_type_): _description_
-#     """
-#     def __init__(self, *, n_agents, **kwargs):
-#         super().__init__(**kwargs)
-#         self.n_agents = n_agents 
-
-#     @partial(jax.jit, static_argnums=(0, 1))
-#     def reset(self, rng: chex.PRNGKey, n:int, *args):
-#         sup = super()
-#         return jax.vmap(
-#             lambda *_: sup.reset()
-#         )(np.arange(n))
+        code_utils_clear_cache(caches)
+        logger.error(f"Generation Failed after {self.max_correction_retry} attempts")
+        return None

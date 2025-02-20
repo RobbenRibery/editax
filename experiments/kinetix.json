@@ -11,7 +11,7 @@
     "env_var": "env_state",
     "env_var_type": "EnvState",
     "out_dir": "editors/kinetix",
-    "out_filename": "editor-o3-mini.py",
+    "out_filename": "editor-o3-mini-8inner-v1.py",
 
     "llm_name": "o3-mini",
     "max_tokens": 4096,

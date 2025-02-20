@@ -1,10 +1,13 @@
 [tool.poetry]
-name = "editex"
+name = "editax"
 version = "0.1.0"
 description = "Automatically created RL Environment Editors"
 authors = ["RobbenRibery <runodng.liu@outlook.com>"]
 license = "Apache 2.0"
 readme = "README.md"
+packages = [
+    { include = "editax" }
+]
 
 [tool.poetry.dependencies]
 python = "^3.12"
@@ -25,6 +28,10 @@ pygame = "^2.6.1"
 omegaconf = "^2.3.0"
 safetensors = "^0.5.2"
 
+
+[tool.poetry.group.dev.dependencies]
+black = "^25.1.0"
+isort = "^6.0.0"
 
 [build-system]
 requires = ["poetry-core"]

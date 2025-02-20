@@ -2,61 +2,65 @@
 <svg xmlns="http://www.w3.org/2000/svg"
      width="150" height="150" viewBox="0 0 150 150">
   <defs>
-    <!-- Dynamic gradient that changes colors over time -->
-    <linearGradient id="dynamicGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#FF7F50">
+    <!-- Dynamic gradient background -->
+    <linearGradient id="bgGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1a1a1a">
         <animate attributeName="stop-color"
-                 values="#FF7F50; #FF4500; #FF7F50"
-                 dur="5s" repeatCount="indefinite" />
+                 values="#1a1a1a; #2a2a2a; #1a1a1a"
+                 dur="4s" repeatCount="indefinite" />
       </stop>
-      <stop offset="100%" stop-color="#1E90FF">
+      <stop offset="100%" stop-color="#2d2d2d">
         <animate attributeName="stop-color"
-                 values="#1E90FF; #00BFFF; #1E90FF"
-                 dur="5s" repeatCount="indefinite" />
+                 values="#2d2d2d; #3d3d3d; #2d2d2d"
+                 dur="4s" repeatCount="indefinite" />
       </stop>
     </linearGradient>
-    <!-- Animated arrow marker -->
-    <marker id="dynamicArrow" markerWidth="6" markerHeight="6" refX="0" refY="2" orient="auto">
-      <path d="M0,0 L0,4 L6,2 Z" fill="white">
-        <animate attributeName="fill" values="#FFFFFF; #FFD700; #FFFFFF" dur="3s" repeatCount="indefinite" />
-      </path>
-    </marker>
-    <!-- Inline CSS for interactivity -->
+    
+    <!-- Animation for rotation -->
     <style type="text/css"><![CDATA[
-      /* Rotate and scale the entire logo on hover */
-      .dynamic:hover {
-        animation: rotateScale 3s ease-in-out infinite;
+      @keyframes rotate {
+        from { transform: rotate(0deg); }
+        to { transform: rotate(360deg); }
       }
-      @keyframes rotateScale {
-        0% { transform: rotate(0deg) scale(1); }
-        50% { transform: rotate(180deg) scale(1.1); }
-        100% { transform: rotate(360deg) scale(1); }
+      .formula {
+        animation: rotate 8s linear infinite;
       }
-      /* Change text color on hover */
-      .textHover:hover {
-        fill: #FFD700;
-        cursor: pointer;
+      .math-text {
+        font-family: "Times New Roman", serif;
+        font-style: italic;
       }
     ]]></style>
   </defs>
+
+  <!-- Background circle -->
+  <circle cx="75" cy="75" r="70" fill="url(#bgGradient)"/>
   
-  <!-- Wrap everything in a group for interactive animations with the transform-origin adjusted -->
-  <g class="dynamic" style="transform-origin: 75px 75px;">
-    <!-- Animated pulsating elliptical background with the dynamic gradient -->
-    <ellipse cx="75" cy="75" rx="60" ry="40" fill="url(#dynamicGradient)">
-      <animate attributeName="rx" values="55;65;55" dur="2s" repeatCount="indefinite" />
-      <animate attributeName="ry" values="35;45;35" dur="2s" repeatCount="indefinite" />
-    </ellipse>
+  <!-- Rotating group for Euler's formula -->
+  <g class="formula" style="transform-origin: 75px 75px;">
+    <!-- e^(iπ) -->
+    <text x="45" y="75" class="math-text" fill="#00ff88" font-size="24" text-anchor="middle">e</text>
+    <text x="55" y="65" class="math-text" fill="#00ff88" font-size="16">iπ</text>
     
-    <!-- The "Editax" text with a more interesting font; centered -->
-    <text x="75" y="85" font-family="Brush Script MT, cursive" font-size="20" fill="white"
-          text-anchor="middle" dominant-baseline="middle" class="textHover">
-      Editax
-    </text>
+    <!-- + -->
+    <text x="75" y="75" fill="#ff3366" font-size="24" text-anchor="middle">+</text>
     
-    <!-- Diagonal arrow with animated stroke width -->
-    <line x1="40" y1="110" x2="110" y2="40" stroke="white" stroke-width="2" marker-end="url(#dynamicArrow)">
-      <animate attributeName="stroke-width" from="2" to="3" dur="1.5s" repeatCount="indefinite" />
-    </line>
+    <!-- 1 -->
+    <text x="95" y="75" fill="#3399ff" font-size="24" text-anchor="middle">1</text>
+    
+    <!-- = -->
+    <text x="115" y="75" fill="#ff3366" font-size="24" text-anchor="middle">=</text>
+    
+    <!-- 0 -->
+    <text x="135" y="75" fill="#ffcc00" font-size="24" text-anchor="middle">0</text>
   </g>
+
+  <!-- Static "Editax" text at bottom -->
+  <text x="75" y="120" 
+        font-family="Arial, sans-serif" 
+        font-size="20" 
+        fill="#ffffff"
+        text-anchor="middle"
+        font-weight="bold">
+    Editax
+  </text>
 </svg> 

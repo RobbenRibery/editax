@@ -124,8 +124,11 @@ class EditorMaker:
 
     synthesize = dedent(
     """
-    Given the all previous responses that you've produced.
-    Comparing your previous responses, then synthesize one response that would represent your most consistent idea.
+    ## Synthesize
+    Given all previous responses that has been produced, synthesize a single version based on majority consensus.
+    This version should be the most consistent and comprehensive version of all previous responses.
+    
+    You must supply a short justification for why each function was picked in the final version.
     """
     ).strip()
 

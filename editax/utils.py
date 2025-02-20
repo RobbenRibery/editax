@@ -20,6 +20,13 @@ import re
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+# Add console handler
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+console_handler.setFormatter(formatter)
+logger.addHandler(console_handler)
+
 def code_utils_get_module_from_path(path:str) -> str: 
     path_without_suffix = path.strip(".py") 
     return  path_without_suffix.replace("/",".")
@@ -317,7 +324,7 @@ def parse_imports(source_code:str) -> List[str]:
 
 class LoggingHandler(BaseCallbackHandler):
     def on_llm_end(self, response: LLMResult, **kwargs) -> None:
-        logger.info("LLM Output: \n %s", response)
+        logger.info("=> LLM Output: \n %s", response.generations[0][0].text)
 
 class EditorScriptParser(BaseOutputParser[str]):
     """Simple mutators parser returning the whole script from LLM
