@@ -9,7 +9,7 @@
     <img src="https://img.shields.io/badge/python-3.12+-blue.svg" alt="Python Version">
     <img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="License">
     <a href="https://github.com/yourusername/editax/issues">
-      <img src="https://img.shields.io/github/issues/yourusername/editax" alt="Issues">
+      <img src="https://img.shields.io/github/issues/yourusername`/editax" alt="Issues">
     </a>
   </div>
 </div>
@@ -103,3 +103,5 @@ Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for detai
 [4] Matthews, M., et al. (2024). [Craftax: A Lightning-Fast Benchmark for Open-Ended Reinforcement Learning](https://arxiv.org/abs/2402.16801)
 
 [5] Jiang, M., et al. (2023). [Minimax Regret Environment Design for Open-Ended Learning](https://arxiv.org/abs/2311.12716)
+
+[6] Chen, X., et al. (2023). [Universal Self-Consistency for Large Language Model Generation](https://arxiv.org/abs/2311.17311)
