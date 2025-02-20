@@ -6,7 +6,7 @@
   <p>A framework for automated ACCEL-type editors for Unsupervised Environment Design</p>
 
   <div>
-    <img src="https://img.shields.io/badge/python-3.8+-blue.svg" alt="Python Version">
+    <img src="https://img.shields.io/badge/python-3.12+-blue.svg" alt="Python Version">
     <img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="License">
     <a href="https://github.com/yourusername/editax/issues">
       <img src="https://img.shields.io/github/issues/yourusername/editax" alt="Issues">
