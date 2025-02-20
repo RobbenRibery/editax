@@ -38,6 +38,7 @@ Follow these steps to set up Editax locally:
 
 3. **Install Dependencies with Poetry:**
    ```bash
+   pip install poetry
    poetry install
    ```
 
