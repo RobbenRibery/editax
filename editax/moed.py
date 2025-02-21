@@ -25,6 +25,8 @@ from langchain_openai.chat_models.base import BaseChatOpenAI
 from langchain_openai import ChatOpenAI
 from langchain_anthropic import ChatAnthropic
 
+from functools import partial
+
 import logging
 
 from tqdm import tqdm 
@@ -39,23 +41,12 @@ formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(messag
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
-class EditorBuffer(struct.PyTreeNode): 
-    """
-    A buffer that stores the successful editor combinations and their unique indices.
-    """
-    successful_combos: chex.Array #(buffer_size, n_edits)
-    unique_editor_indicies: chex.Array
-    
-    buffer_size: int = struct.field(pytree_node=False, default=400)
-    n_edits: int = struct.field(pytree_node=False, default=20)
-    default_num_mutation: int = struct.field(pytree_node=False, default=1)
-    default_random_prob: float = struct.field(pytree_node=False, default=1.0)
-
 
 class EditorManager:
 
     def __init__(
         self,
+
         # env info
         env_name: str,
         env_entry_point: str,
@@ -76,9 +67,12 @@ class EditorManager:
         corrector_template = EditorCorrector,
         parser = EditorScriptParser,
         engine_statement: str = "",
-        editor_buffer_size:int = 320,
+
+        # edits config
         n_edits:int = 20,
         init_editors: bool = True,
+
+        # logging
         verbose: bool = True,
     ):
         """
@@ -113,9 +107,6 @@ class EditorManager:
         self.env_var_type = env_var_type
         self.engine_statement = engine_statement
         self.input_string = self.load_env_input_string()
-
-        # editor buffer 
-        self.editor_buffer_size = editor_buffer_size
         self.n_edits = n_edits
 
         self.model_name = llm_name
@@ -200,56 +191,33 @@ class EditorManager:
 
         return input_string
 
-    def reset(
-        self, 
-        rng:chex.PRNGKey,
-        correction_only:bool = True, 
-        dummy_env_state:EnvState | None = None,
-        num_inner_loops:int = 8,
-    )-> Dict[str, Callable]:
+    def reset(self, dummy_env_state:EnvState, num_inner_loops:int = 8)-> Dict[str, Callable]:
         """
         Resets the editor manager, generating new editors and an editor buffer.
 
         Args:
-            rng: The random key for generating the editors and the editor buffer.
-            correction_only: Whether to only correct the existing editors or generate new
-                ones. Defaults to True.
             dummy_env_state: The dummy environment state used for testing the editors.
                 Defaults to None.
             num_inner_loops: The number of design iterations to perform when generating
                 editors. Defaults to 8.
 
         Returns:
-            A dictionary mapping editor names to the corresponding editor functions and
-            an EditorBuffer object containing the editor buffer.
+            A dictionary mapping editor names to the corresponding editor functions
         """
         init_editor_map = self.generate_and_correct(
             corrective_func= self.llm_correct_editors,
             dummy_env_state= dummy_env_state,
             generative_args= (num_inner_loops, ),
-            correction_only= correction_only,
+            correction_only= False if self.init_editors else True,
         )
-        self.org_editors_map = init_editor_map
+        self.editors_map = init_editor_map
 
-        # init editors        
+        # register editors        
         self.editors:List[Callable] = [init_editor_map[k] for k in init_editor_map]
         self.n_eidtors = len(self.editors)
-        self.default_num_mutation = 1 
 
-        # init the editors buffer 
-        self.init_successful_combos = jax.random.choice(
-            rng,
-            self.n_eidtors,
-            shape= (self.editor_buffer_size, self.n_edits),
-        )
-        return init_editor_map, EditorBuffer(
-            successful_combos = self.init_successful_combos,
-            unique_editor_indicies = jnp.arange(self.n_eidtors, dtype=jnp.int32),
-            buffer_size = self.editor_buffer_size,
-            n_edits = self.n_edits,
-            default_num_mutation = self.default_num_mutation,
-        )
-    
+        return init_editor_map
+
     def llm_sample_editors_design(self,) -> str:
         """
         Sample a design for editor generation using the large language model.
@@ -574,3 +542,50 @@ class EditorManager:
         code_utils_clear_cache(caches)
         logger.error(f"Generation Failed after {self.max_correction_retry} attempts")
         return None
+    
+    @partial(jax.jit, static_argnums=(0, ))
+    def samle_random_edit_seqs(self, rng:chex.PRNGKey) -> chex.Array: 
+        return jax.random.choice(
+            rng,
+            a = len(self.editors),
+            shape=(self.n_edits,)
+        )
+    
+    @partial(jax.jit, static_argnums=(0, ))
+    def perform_edits(
+        self, 
+        rng:chex.PRNGKey, 
+        env_state:EnvState,
+        editors_indices:chex.Array,
+    ) -> EnvState:
+        
+        # Step function for jax.lax.scan
+        def _step_fn(carry, pair_):
+            idx = pair_
+            rng, current_env = carry
+            
+            # Split the RNG for the next step
+            rng, arng, _ = jax.random.split(rng, 3)
+
+            # Use jax.lax.switch to select the mutator 
+            # function based on the index
+            new_env = jax.lax.switch(
+                idx, 
+                self.editors,
+                *(
+                    arng, 
+                    current_env, 
+                ),
+                )
+            # Return the new carry (rng, new_env) and
+            # the mutated environment for tracking
+            return (rng, new_env,), new_env
+        
+        initial_carry = (rng, env_state)
+        final_carry, _ = jax.lax.scan(
+            _step_fn, 
+            initial_carry, 
+            (editors_indices),
+        )
+        _, new_env_state = final_carry
+        return new_env_state

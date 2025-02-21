@@ -17,9 +17,10 @@
     "max_tokens": 4096,
     "temperature": 1.0,
     "max_correction_retry": 5,
-
     "engine_statement": "We use the jax2d physics engine to simulate the dynamics of the environment.",
     
-    "init_editors": true,
+    "n_edits":20,
+    "init_editors": false,
+    
     "verbose": true
 }

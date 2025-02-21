@@ -8,6 +8,7 @@ import chex
 from editax.moed import EditorManager
 from editax.utils import code_utils_test_editors
 
+# you must have installed kinetix first
 from kinetix.environment.env import make_kinetix_env_from_args
 from kinetix.environment.env_state import EnvParams, StaticEnvParams
 from kinetix.environment.ued.ued_state import UEDParams
@@ -50,11 +51,14 @@ if __name__ == "__main__":
     
     num_inner_loops = 8
     # generate editors
-    func_map, editor_buffer = editor_manager.reset(
-        rng_editor,
-        num_inner_loops=num_inner_loops,
-        dummy_env_state=level,
-        correction_only=True,
+    func_map = editor_manager.reset(
+        level,
+        num_inner_loops,
     )
 
-    pprint(func_map)
+    rng, sample_rng = jax.random.split(rng)
+    editor_indicies = editor_manager.samle_random_edit_seqs(sample_rng)
+
+    rng, edits_rng = jax.random.split(sample_rng)
+    edited_level = editor_manager.perform_edits(edits_rng, level, editor_indicies)
+
