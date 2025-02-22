@@ -1,3 +1,6 @@
+"""
+Code reference to https://github.com/DramaCow/jaxued/blob/main/src/jaxued/environments/underspecified_env.py
+"""
 from typing import Any, Tuple, Optional, Union
 import jax
 import chex

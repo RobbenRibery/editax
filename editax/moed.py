@@ -10,7 +10,7 @@ from typing import List, Dict
 import inspect 
 
 from editax.template import EditorMaker, EditorCorrector
-from editax.state import EnvState
+from editax.upomdp import EnvState
 from editax.utils import (
     LoggingHandler,
     EditorScriptParser, 
@@ -558,8 +558,21 @@ class EditorManager:
         env_state:EnvState,
         editors_indices:chex.Array,
     ) -> EnvState:
-        
-        # Step function for jax.lax.scan
+        """
+        Perform edits on an environment state.
+
+        This function takes in the random number generator, the environment state to be modified, 
+        and the indices of the editors to use. It applies the editors in the order specified by 
+        `editors_indices` to the environment state. The function is jax-jitable.
+
+        Args:
+            rng: The random number generator.
+            env_state: The environment state to be modified.
+            editors_indices: The indices of the editors to use.
+
+        Returns:
+            EnvState: The modified environment state.
+        """
         def _step_fn(carry, pair_):
             idx = pair_
             rng, current_env = carry

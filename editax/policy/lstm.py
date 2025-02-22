@@ -1,3 +1,4 @@
+"Code reference to https://github.com/DramaCow/jaxued/blob/main/examples/maze_plr.py"
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -6,7 +7,7 @@ import flax.linen as nn
 import distrax
 from flax.linen.initializers import orthogonal, constant
 
-from typing import Optional, Sequence, Tuple, Any
+from typing import Sequence, Tuple, Any
 
 class ResetLSTM(nn.Module):
     """This is a wrapper around an RNN that automatically resets the hidden state upon observing a `done` flag. 
@@ -70,7 +71,7 @@ class ResetLSTM(nn.Module):
 
         return scan(self.cell, carry, inputs)
 
-class LSTMActorCritic(nn.Module):
+class EditorActorCritic(nn.Module):
     """
     A model that uses an LSTM to process sequential data and produce an
     output. The output is then passed through a 2-layer actor and a

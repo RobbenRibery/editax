@@ -12,7 +12,7 @@
       <img src="https://img.shields.io/github/issues/yourusername`/editax" alt="Issues">
     </a>
   </div>
-</div>
+</div>`
 
 ## Overview
 
@@ -105,3 +105,27 @@ Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for detai
 [5] Jiang, M., et al. (2023). [Minimax Regret Environment Design for Open-Ended Learning](https://arxiv.org/abs/2311.12716)
 
 [6] Chen, X., et al. (2023). [Universal Self-Consistency for Large Language Model Generation](https://arxiv.org/abs/2311.17311)
+
+## Citation
+
+If you use this software in your research, please cite it as:
+
+```bibtex
+@software{editax2024,
+  title = {Editax: A Framework for Automated ACCEL-type Editors},
+  author = {
+    Liu, Rundong and 
+    Sudhakaran, Shyam and
+    Beck, Jacob and
+    Zhang, Richard
+  },
+  year = {2024},
+  url = {https://github.com/RobbenRibery/editax},
+  email = {
+    rundong.liu@proton.me and
+    shyamsnair@protonmail.com and
+    jakeabeck@gmail.com and
+    zrich107@gmail.com
+  }
+}
+```

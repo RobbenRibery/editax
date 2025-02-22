@@ -4,7 +4,7 @@ from langchain_core.messages import BaseMessage
 from langchain_core.outputs import LLMResult
 from langchain_core.output_parsers import BaseOutputParser
 
-from editax.state import EnvState
+from editax.upomdp import EnvState
 
 import jax
 import chex
