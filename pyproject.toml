@@ -30,11 +30,13 @@ jaxgl = "^1.0.1"
 pygame = "^2.6.1"
 omegaconf = "^2.3.0"
 safetensors = "^0.5.2"
+craftax = "^1.4.5"
 
 
 [tool.poetry.group.dev.dependencies]
 black = "^25.1.0"
 isort = "^6.0.0"
+ipykernel = "^6.29.5"
 
 [build-system]
 requires = ["poetry-core"]
