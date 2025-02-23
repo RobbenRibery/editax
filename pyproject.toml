@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "Automatically created RL Environment Editors"
 authors = [
     "Rundong Liu <rundong.liu@proton.me>",
-    "Shyam Sudhakaran <shyamsnair@protonmail.com>"
+    "Shyam Sudhakaran <shyamsnair@protonmail.com>",
+    "Jacob Beck <jakeabeck@gmail.com>",
+    "Richard Zhang <zrich107@gmail.com>"
 ]
 license = "Apache 2.0"
 readme = "README.md"
@@ -31,6 +33,7 @@ pygame = "^2.6.1"
 omegaconf = "^2.3.0"
 safetensors = "^0.5.2"
 craftax = "^1.4.5"
+packaging = "^24.2"
 
 
 [tool.poetry.group.dev.dependencies]

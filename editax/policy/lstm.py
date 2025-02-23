@@ -9,6 +9,7 @@ from flax.linen.initializers import orthogonal, constant
 
 from typing import Sequence, Tuple, Any
 
+
 class ResetLSTM(nn.Module):
     """This is a wrapper around an RNN that automatically resets the hidden state upon observing a `done` flag. 
     In this way it is compatible with the jax-style RL loop where episodes automatically end/restart.
@@ -84,7 +85,7 @@ class EditorActorCritic(nn.Module):
     def __call__(
         self, 
         inputs:Tuple[chex.Array, chex.Array], 
-        hidden:chex.Array
+        hidden_state:chex.Array
     ) -> Tuple[chex.Array, distrax.Distribution, chex.Array]:
         """
         The forward pass of the RNNActorCritic model.
@@ -128,7 +129,7 @@ class EditorActorCritic(nn.Module):
         hidden, x = ResetLSTM(
             nn.OptimizedLSTMCell(features=self.hidden_dim,)
         )(
-            rnn_in, initial_carry=hidden
+            rnn_in, initial_carry=hidden_state,
         )
 
         ### 2 layers of actor #### 
