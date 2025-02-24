@@ -117,15 +117,17 @@ If you use this software in your research, please cite it as:
     Liu, Rundong and 
     Sudhakaran, Shyam and
     Beck, Jacob and
-    Zhang, Richard
+    Zhang, Richard and
+    Anisimov, Maksim
   },
   year = {2024},
   url = {https://github.com/RobbenRibery/editax},
   email = {
-    rundong.liu@proton.me and
-    shyamsnair@protonmail.com and
-    jakeabeck@gmail.com and
-    zrich107@gmail.com
+    rundong.liu{\@}proton.me and
+    shyamsnair{\@}protonmail.com and
+    jakeabeck{\@}gmail.com and
+    zrich107{\@}gmail.com and
+    m.anisimov23{\@}imperial.ac.uk
   }
 }
 ```
