@@ -1,32 +1,3 @@
-[PLAN STARTS HERE]
-Identified skills a general policy must master include:
-• Precise actuation of motors and thrusters (manual versus automatic control).
-• Managing the physical dynamics of objects (manipulating densities to affect inertia).
-• Coping with environmental forces (adapting to different gravity strengths).
-• Handling the mapping between control signals and physical effect (thruster bindings).
-
-Therefore, the minimum necessary set of states includes:
-• States where motor control is either fully automatic or fully manual.
-• States with modified object densities to alter inertia.
-• States with altered gravity values to change dynamics.
-• States with randomized thruster bindings to modify control mapping.
-
-The following Minimal Meaningful Perturbation (MMP) functions are created. They begin with perturbations that reduce the challenge (e.g. enabling automatic motor control, reducing densities, and lowering gravity) and progress toward perturbations that increase the challenge (e.g. disabling auto motor control, increasing densities, raising gravity, and randomizing thruster bindings).
-
-Each function is a JAX‐jit–compiled function that accepts a PRNG key and an env_state (an instance of EnvState) and returns a modified env_state reflecting an atomic perturbation.
-
-MMP functions:
-1. mmp_enable_motor_auto – Sets env_state.motor_auto to all True (reduces difficulty by offloading motor control).
-2. mmp_disable_motor_auto – Sets env_state.motor_auto to all False (increases difficulty by requiring manual control).
-3. mmp_reduce_densities – Lowers polygon and circle densities, simplifying object mobility.
-4. mmp_increase_densities – Increases densities, making object movement more challenging.
-5. mmp_reduce_gravity – Reduces gravity magnitude to ease dynamics.
-6. mmp_increase_gravity – Increases gravity magnitude, intensifying physical dynamics.
-7. mmp_randomize_thruster_bindings – Randomizes thruster_bindings to disrupt learned action mappings (increases challenge).
-
-[PLAN ENDS HERE]
-
-```Python
 # Imports
 import jax
 import jax.numpy as jnp
@@ -121,4 +92,3 @@ def mmp_randomize_thruster_bindings(rng: chex.PRNGKey, env_state: EnvState) -> E
     # thruster_bindings is assumed to be a 1D jnp.ndarray of integers.
     new_bindings = jax.random.permutation(rng, env_state.thruster_bindings)
     return update_env_state(env_state, thruster_bindings=new_bindings)
-```

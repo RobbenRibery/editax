@@ -24,8 +24,9 @@ static_env_params = StaticEnvParams()
 ued_params = UEDParams()
 
 with open("experiments/kinetix.json", "r") as f:
-    config = json.load(f)
+    config:dict = json.load(f)
 
+num_inner_loops = config.pop("num_inner_loops", 10)
 editor_manager = EditorManager(**config)
 
 
@@ -49,7 +50,6 @@ if __name__ == "__main__":
         env_params=env_params,
     )
     
-    num_inner_loops = 8
     # generate editors
     func_map = editor_manager.reset(
         level,
@@ -60,5 +60,5 @@ if __name__ == "__main__":
     editor_indicies = editor_manager.samle_random_edit_seqs(sample_rng)
 
     rng, edits_rng = jax.random.split(sample_rng)
-    edited_level = editor_manager.perform_edits(edits_rng, level, editor_indicies)
+    edited_level = editor_manager.perform_random_edit_seqs(edits_rng, level, editor_indicies)
 

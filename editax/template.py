@@ -296,3 +296,14 @@ class EditorCorrector:
     def get_regen_full(cls, source_augmented:bool = False)-> str:
         return cls.get_system_template() + '\n\n' + \
             cls.get_regen_template() if not source_augmented else cls.get_source_augmented_regen()
+    
+
+class EditorMakerComprehensive(EditorMaker):
+
+    synthesize = dedent(
+    """
+    ## Synthesize
+    Given all previous responses that has been produced, synthesize a single version that comprehensively covers all the previous responses.
+    You must supply a short justification for why each function was picked in the final version.
+    """
+    ).strip()

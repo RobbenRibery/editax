@@ -6,10 +6,14 @@ import chex
 from flax import struct
 
 import os
-from typing import List, Dict
+from typing import List, Dict, Type
 import inspect 
 
-from editax.template import EditorMaker, EditorCorrector
+from editax.template import (
+    EditorMaker, 
+    EditorCorrector, 
+    EditorMakerComprehensive
+)
 from editax.upomdp import EnvState
 from editax.utils import (
     LoggingHandler,
@@ -66,7 +70,7 @@ class EditorManager:
         max_correction_retry:int,
         
         # editor templates
-        maker_template = EditorMaker,
+        maker_template:Type[EditorMaker] = None,
         corrector_template = EditorCorrector,
         parser = EditorScriptParser,
         engine_statement: str = "",
@@ -117,6 +121,11 @@ class EditorManager:
         self.max_correction_retry = max_correction_retry
         
         # prompt templates 
+        if not maker_template:
+            maker_template = EditorMaker
+        else:
+            maker_template = eval(maker_template)
+
         self.maker_template = maker_template
         self.corrector_template = corrector_template
 

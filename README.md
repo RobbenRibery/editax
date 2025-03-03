@@ -127,7 +127,7 @@ If you use this software in your research, please cite it as:
     shyamsnair{\@}protonmail.com and
     jakeabeck{\@}gmail.com and
     zrich107{\@}gmail.com and
-    m.anisimov23{\@}imperial.ac.uk
+    m.anisimov23{\@}imperial.ac.uk`
   }
 }
 ```
