@@ -11,17 +11,17 @@
     "env_var": "env_state",
     "env_var_type": "EnvState",
     "out_dir": "editors/kinetix",
-    "out_filename": "editor_o3_mini_10inner_comp_v2.py",
+    "out_filename": "editor_o3_mini_10inner_overlooked_v1.py",
 
     "llm_name": "o3-mini",
     "max_tokens": 4096,
     "temperature": 1.0,
-    "max_correction_retry": 5,
+    "max_correction_retry": 6,
     "engine_statement": "We use the jax2d physics engine to simulate the dynamics of the environment.",
     
     "n_edits":20,
     "init_editors": true,
-    "maker_template": "EditorMakerComprehensive",
+    "maker_template": "EditorMakerOverlooked",
     "verbose": true,
 
     "num_inner_loops": 10

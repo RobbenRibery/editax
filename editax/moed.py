@@ -12,7 +12,8 @@ import inspect
 from editax.template import (
     EditorMaker, 
     EditorCorrector, 
-    EditorMakerComprehensive
+    EditorMakerComprehensive,
+    EditorMakerOverlooked,
 )
 from editax.upomdp import EnvState
 from editax.utils import (
@@ -512,7 +513,7 @@ class EditorManager:
             logger.info(f"LLM Attempting to fix: {func_name} ...")
             code_prior, _ = code_utils_split_code(editors)
             editors_lit = code_prior + '\n' + inspect.getsource(func_map[func_name])
-            corrections = corrective_func(editors_lit, error)
+            _, corrections = corrective_func(editors_lit, error)
             
             # save the corrected script
             correction_file = file_name_without_ext + f"_tmp{i}_correction.py"

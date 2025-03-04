@@ -307,3 +307,17 @@ class EditorMakerComprehensive(EditorMaker):
     You must supply a short justification for why each function was picked in the final version.
     """
     ).strip()
+
+
+class EditorMakerOverlooked(EditorMaker):
+
+    synthesize = dedent(
+    """
+    ## Synthesize
+    Given all previous responses that has been produced, synthesize a single version that has the following properties:
+    (1) includes all mmps that appeared frequently across different responses
+    (2) includes all mmps that are novel to each individual responses
+    (3) includes a pair of mmps that represent areas overlooked by all existing responses.
+    (4) Limit your final version up to 12 mmps
+    """
+    ).strip()

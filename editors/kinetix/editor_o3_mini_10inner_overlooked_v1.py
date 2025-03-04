@@ -1,4 +1,4 @@
-```Python
+from typing import List
 # imports 
 import jax
 import jax.numpy as jnp
@@ -29,15 +29,20 @@ def get_random_index(rng: chex.PRNGKey, mask: jnp.ndarray) -> tuple[chex.PRNGKey
     """
     Returns a random index from those positions where mask is True.
     If no candidate exists, returns -1.
+    This corrected implementation avoids using jnp.nonzero by sampling directly
+    using a probability distribution computed from the mask.
     """
-    candidate_indices = jnp.nonzero(mask)[0]
+    total = jnp.sum(mask).astype(jnp.float32)
     rng, subkey = jax.random.split(rng)
-    def choose(idx):
-        return jax.random.choice(subkey, idx)
-    selected = lax.cond(candidate_indices.shape[0] > 0,
-                        lambda: choose(candidate_indices),
-                        lambda: -1,
-                        operand=None)
+    selected = lax.cond(
+        total > 0,
+        lambda: jax.random.choice(
+            subkey,
+            a=mask.shape[0],
+            p=mask.astype(jnp.float32) / total
+        ),
+        lambda: -1
+    )
     return rng, selected
 
 ######################
@@ -232,4 +237,3 @@ def mmp_decrease_friction(rng: chex.PRNGKey, env_state: EnvState) -> EnvState:
         circle=env_state.circle.replace(friction=new_circle_friction)
     )
     return new_state
-```
