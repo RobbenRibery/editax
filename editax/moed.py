@@ -15,6 +15,7 @@ from editax.template import (
     EditorMakerComprehensive,
     EditorMakerOverlooked,
 )
+from kinetix.environment.env_state import EnvParams
 from editax.upomdp import EnvState
 from editax.utils import (
     LoggingHandler,
@@ -25,6 +26,8 @@ from editax.utils import (
     code_utils_test_editors,
     prompt_utils_form_designs,
 )
+
+from jaxued.environments.underspecified_env import Observation, UnderspecifiedEnv
 
 from flax.training.train_state import TrainState as BaseTrainState
 from langchain_openai.chat_models.base import BaseChatOpenAI
@@ -79,7 +82,7 @@ class EditorManager:
         # edits config
         n_edits:int = 20,
         init_editors: bool = True,
-
+        n_editor_rollouts:int = 10,
         # logging
         verbose: bool = True,
     ):
@@ -116,6 +119,7 @@ class EditorManager:
         self.engine_statement = engine_statement
         self.input_string = self.load_env_input_string()
         self.n_edits = n_edits
+        self.n_editor_rollouts = n_editor_rollouts
 
         self.model_name = llm_name
         self.max_tokens = max_tokens
@@ -228,6 +232,7 @@ class EditorManager:
         # register editors        
         self.editors:List[Callable] = [init_editor_map[k] for k in init_editor_map]
         self.n_eidtors = len(self.editors)
+        self.edit_eps_length = self.n_editor_rollouts * self.n_edits
 
         return init_editor_map
 
@@ -616,16 +621,17 @@ class EditorManager:
         _, new_env_state = final_carry
         return new_env_state
     
-
     #@partial(jax.jit, static_argnums=(0, 6))
-    def sample_edit_trajectories_rnn(
+    def sample_edit_trajectories(
         self,
+        env: UnderspecifiedEnv,
         rng: chex.PRNGKey,
         train_state: EditorPolicyTrainState,
         init_hstate: chex.ArrayTree,
+        init_obs: Observation,
         init_env_state: EnvState,
+        env_params: EnvParams,
         num_envs: int,
-        edit_eps_length: int = 256,
     ) -> Tuple[
         Tuple[
             chex.Array,
@@ -641,50 +647,29 @@ class EditorManager:
             chex.Array,
         ],
     ]:
-        """
-        This function samples a trajectory using the given policy and a list of editors. 
-        The trajectory is sampled for a total of `edit_eps_length` steps. 
-        The function returns a tuple of two elements. 
-        The first element is a tuple of five elements, 
-            which are the random number generator, the policy, the last hidden state, the last environment state, and the last value. 
-        The second element is a tuple of four elements, 
-            which are the editor indicies, the done flags, the log probabilities, and the values.
-
-        Args:
-            rng: The random number generator.
-            train_state: The policy.
-            init_hstate: The initial hidden state.
-            init_env_state: The initial environment state.
-            num_envs: The number of environments to sample from.
-            editors: A list of editors to use.
-            num_edits: The number of edits to perform before returning a new trajectory.
-            edit_eps_length: The total number of steps to sample for.
-
-        Returns:
-            A tuple of two elements. 
-            The first element is a tuple of five elements, 
-                which are the random number generator, the policy, the last hidden state, the last environment state, and the last value. 
-            The second element is a tuple of four elements, 
-                which are the editor indicies, the done flags, the log probabilities, and the values.
-        """
-
+        # assert the edit_eps_length is divisible by n_edits
+        assert self.edit_eps_length % self.n_edits == 0, "edit_eps_length must be divisible by n_edits"
+        
         def sample_step(carry: Tuple, _) -> Tuple:
             """
             This function is used to sample a single step in the trajectory.
             """
-            rng, train_state, hstate, env_state, edited_steps, last_done = carry
+            rng, train_state, hstate, obs, env_state, edited_steps, last_done = carry
+            print(f"Env State shape: {env_state.thruster_bindings.shape}")
             rng, rng_action, rng_step = jax.random.split(rng, 3)
 
-            # get the editor indicies from the policy
+            # unsqueeze the first dimension for the env state and done flag
+            # dones are used to simbolify the reset of the rnn hidden states
             x = jax.tree_util.tree_map(
                 lambda x: x[jnp.newaxis, ...], 
-                (env_state, last_done),
+                (obs, last_done),
             )
-            print(x[0].shape)
-            print(x[1].shape)
-            hstate, pi, value = train_state.apply_fn(train_state.params, x, hstate)
+            
+            hstate, pi, value = train_state.apply_fn(train_state.params, hstate, x)
             editor_idx = pi.sample(seed=rng_action)
             log_prob = pi.log_prob(editor_idx)
+            
+            # sequeeze the first dim
             value, editor_idx, log_prob = (
                 value.squeeze(0),
                 editor_idx.squeeze(0),
@@ -701,44 +686,61 @@ class EditorManager:
                         env_state,
                     ),
                 )
-            )(editor_idx, jax.random.split(rng_step, num_envs), env_state)
+            )(
+                editor_idx, 
+                jax.random.split(rng_step, num_envs), 
+                env_state
+            )
+            print(f"Next env state: {next_env_state.thruster_bindings.shape}")
+            next_obs, next_env_state = jax.vmap(env.reset_to_level, in_axes=(0, 0, None))(
+                jax.random.split(rng_step, num_envs), 
+                next_env_state, 
+                env_params  
+            )
+            next_env_state = next_env_state.env_state.env_state.env_state
             # update the edited steps
             edited_steps += 1
-            #
+            # update the done flag
             done = jnp.where(
                 edited_steps % self.n_edits == 0,
                 jnp.ones((num_envs,), dtype=jnp.bool),
                 jnp.zeros((num_envs,), dtype=jnp.bool),
             )
 
-            carry = (rng, train_state, hstate, next_env_state, done)
+            carry = (rng, train_state, hstate, next_obs, next_env_state, edited_steps, done)
             step = (editor_idx, done, log_prob, value)
             return carry, step
 
         edited_steps = 0
-        (rng, train_state, hstate, last_env_state, last_done), traj = jax.lax.scan(
+        (rng, train_state, last_hstate, last_obs, last_env_state, _, last_done), traj = jax.lax.scan(
             sample_step,
             (
-                rng,
-                train_state,
-                init_hstate,
+                rng,            # initial seed 
+                train_state,    # initial editor policy train state 
+                init_hstate,    # initial hidden state 
+                init_obs, # inital env state to be edited
                 init_env_state,
-                edited_steps,
-                jnp.zeros((num_envs,), dtype=jnp.bool),
+                edited_steps, # edition steps used
+                jnp.zeros((num_envs,), dtype=jnp.bool), #init dones as full zero (expect to be all completed)
             ),
             None,
-            length=edit_eps_length,
+            length=self.edit_eps_length, #scheduled for 256 steps in total (reset when done with a single rollout)
         )
 
-        x = jax.tree_util.tree_map(
-            lambda x: x[jnp.newaxis, ...], (last_env_state, last_done)
+        last_x = jax.tree_util.tree_map(
+            lambda x: x[jnp.newaxis, ...], 
+            (
+                last_obs, 
+                last_done
+            )
         )
-        _, _, last_value = train_state.apply_fn(train_state.params, x, hstate)
+        _, _, last_value = train_state.apply_fn(train_state.params, last_hstate, last_x)
 
         return (
             rng,
             train_state,
-            hstate,
+            last_hstate,
+            last_obs,
             last_env_state,
             last_value.squeeze(0),
         ), traj

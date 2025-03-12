@@ -1,4 +1,3 @@
-```Python
 # imports
 import jax
 import jax.numpy as jnp
@@ -147,4 +146,3 @@ def mmp_randomize_roles(rng: chex.PRNGKey, env_state: EnvState) -> EnvState:
     new_circle_roles = jax.random.randint(subkey, env_state.circle_shape_roles.shape, 0, num_roles)
     return env_state.replace(polygon_shape_roles=new_polygon_roles,
                              circle_shape_roles=new_circle_roles)
-```
