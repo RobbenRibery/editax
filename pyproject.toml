@@ -27,7 +27,6 @@ imageio = "^2.36.1"
 matplotlib = "^3.10.0"
 jax2d = "^1.0.1"
 gymnax = "^0.0.8"
-jaxued = {git = "https://github.com/DramaCow/jaxued.git", branch = "main"}
 jaxgl = "^1.0.1"
 pygame = "^2.6.1"
 omegaconf = "^2.3.0"
@@ -40,6 +39,7 @@ packaging = "^24.2"
 black = "^25.1.0"
 isort = "^6.0.0"
 ipykernel = "^6.29.5"
+jaxued = {git = "https://github.com/DramaCow/jaxued.git", branch = "main"}
 
 [build-system]
 requires = ["poetry-core"]

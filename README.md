@@ -38,18 +38,29 @@ Implementing ACCEL requires significant domain knowledge for each UPOMDP. Editax
 - Python 3.12+
 - pip
 
-### Using Poetry (Recommended)
+
+### Installing from PyPI
+
+If you prefer not to clone the repository, you can install the main package from PyPI:
 
 ```bash
-# Clone the repository
+# Install the main package
+pip install editax
+
+# For full functionality, install the git dependency separately:
+pip install git+https://github.com/DramaCow/jaxued.git@main
+```
+
+### Development Installation
+
+For development work (including dev dependencies such as `jaxued`), clone the repository and install using Poetry with dev extras:
+
+```bash
 git clone https://github.com/RobbenRibery/editax.git
 cd editax
-
-# Install dependencies
 python -m venv .venv
 source .venv/bin/activate
-pip install poetry
-poetry install
+poetry install --with dev
 ```
 
 ### Environment Setup

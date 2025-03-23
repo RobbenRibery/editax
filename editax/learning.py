@@ -88,7 +88,7 @@ def update_editr_actor_critic_rnn(
                     axis=-1
                 ).mean()
 
-                loss = l_clip + critic_coeff * l_vf - entropy_coeff * entropy + kl_coeff * kl_random
+                loss = l_clip + critic_coeff * l_vf + kl_coeff * kl_random
 
                 return loss, (l_vf, l_clip, entropy)
 
